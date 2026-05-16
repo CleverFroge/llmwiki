@@ -52,6 +52,20 @@ This prints a JSON snippet for `claude_desktop_config.json` (Claude Desktop) or 
 
 Then tell Claude: *"Read the guide, then ingest my sources and start building the wiki."*
 
+### Using with non-Claude clients
+
+LLM Wiki is an MCP server, so any MCP-capable client works — not just Claude Desktop / Code. The server-side tools (`guide`, `search`, `read`, `create`, `edit`, `append`, `delete`) are the same across clients; agent quality is up to whichever client/model is at the other end.
+
+Useful options for offline / corporate-firewall / local-model setups:
+
+- **opencode** — open-source coding agent with MCP support. Runs against Ollama, vLLM, or any OpenAI-compatible local endpoint.
+- **continue.dev** — VS Code / JetBrains extension with MCP (Agent mode) and Ollama support.
+- **Cursor** and **Cline** — IDE-based clients with MCP support.
+
+Point your client's MCP config at the same `llmwiki mcp <workspace>` command you'd use for Claude (see `llmwiki mcp-config` output). Multiple clients can point at the same workspace, but avoid simultaneous writes to the same page — there's no cross-process write lock, so concurrent edits can lose updates.
+
+Local models need reliable tool/function calling — most Llama / Qwen-class models can do this, but quality varies a lot by model, context length, and client configuration. The `guide` tool is your friend: have the client call it first so the model gets the workspace structure and conventions before it starts writing.
+
 ### One-command start
 
 ```bash
