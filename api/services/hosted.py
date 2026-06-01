@@ -512,33 +512,41 @@ class HostedDocumentService(DocumentService):
         expected_version: int | None = None,
     ) -> dict | None:
         payload = json.dumps(highlights)
-        if expected_version is None:
-            row = await self.pool.fetchrow(
-                "UPDATE documents SET highlights = $1::jsonb, "
-                "version = version + 1, updated_at = now() "
-                "WHERE id = $2 AND user_id = $3 "
-                "RETURNING id::text, version, highlights",
-                payload, doc_id, self.user_id,
-            )
-        else:
-            row = await self.pool.fetchrow(
-                "UPDATE documents SET highlights = $1::jsonb, "
-                "version = version + 1, updated_at = now() "
-                "WHERE id = $2 AND user_id = $3 AND version = $4 "
-                "RETURNING id::text, version, highlights",
-                payload, doc_id, self.user_id, expected_version,
-            )
-            if not row:
-                # Check whether the doc exists at all (404) vs just stale (409)
-                exists = await self.pool.fetchval(
-                    "SELECT 1 FROM documents WHERE id = $1 AND user_id = $2",
+        conn = await self.pool.acquire()
+        try:
+            async with conn.transaction():
+                # Fetch + lock the doc row so we have OLD highlights inside
+                # the same txn that writes the new ones. Required for the
+                # (old ∪ new) chunk recomputation downstream — a deletion
+                # would otherwise leave stale annotations.
+                locked = await conn.fetchrow(
+                    "SELECT version, highlights FROM documents "
+                    "WHERE id = $1 AND user_id = $2 FOR UPDATE",
                     doc_id, self.user_id,
                 )
-                if exists:
+                if not locked:
+                    return None
+                if expected_version is not None and locked["version"] != expected_version:
                     return {"conflict": True}
-                return None
+
+                old_highlights = self._parse_highlights(locked["highlights"])
+
+                row = await conn.fetchrow(
+                    "UPDATE documents SET highlights = $1::jsonb, "
+                    "version = version + 1, updated_at = now() "
+                    "WHERE id = $2 AND user_id = $3 "
+                    "RETURNING id::text, version, highlights",
+                    payload, doc_id, self.user_id,
+                )
+                if not row:
+                    return None
+                new_highlights = self._parse_highlights(row["highlights"])
+                await self._recompute_chunks_for_doc(conn, doc_id, old_highlights, new_highlights)
+        finally:
+            await self.pool.release(conn)
+
         result = dict(row)
-        result["highlights"] = self._parse_highlights(result.get("highlights"))
+        result["highlights"] = new_highlights
         return result
 
     @staticmethod
@@ -601,6 +609,10 @@ class HostedDocumentService(DocumentService):
                     "RETURNING id::text, version, highlights",
                     json.dumps(next_list), doc_id, self.user_id,
                 )
+                if updated:
+                    await self._recompute_chunks_for_doc(
+                        conn, doc_id, current, next_list,
+                    )
         finally:
             await self.pool.release(conn)
 
@@ -650,6 +662,10 @@ class HostedDocumentService(DocumentService):
                     "RETURNING id::text, version, highlights",
                     json.dumps(next_list), doc_id, self.user_id,
                 )
+                if updated:
+                    await self._recompute_chunks_for_doc(
+                        conn, doc_id, current, next_list,
+                    )
         finally:
             await self.pool.release(conn)
 
@@ -658,6 +674,53 @@ class HostedDocumentService(DocumentService):
         result = dict(updated)
         result["highlights"] = self._parse_highlights(result.get("highlights"))
         return result
+
+    async def _recompute_chunks_for_doc(
+        self, conn, doc_id: str,
+        old_highlights: list[dict], new_highlights: list[dict],
+    ) -> None:
+        """Update affected chunks' annotations_text + has_highlight + content.
+
+        Affected = chunks touched by old highlights ∪ chunks touched by new
+        highlights. The union prevents stale annotations when a highlight is
+        deleted or moves to a different chunk.
+
+        Called inside the highlight CRUD transaction so the chunk write and
+        the documents.highlights write commit atomically.
+        """
+        from services.highlight_chunks import (
+            ChunkRecord, all_affected_chunks, iter_chunks_with_annotations,
+        )
+
+        rows = await conn.fetch(
+            "SELECT id::text AS id, chunk_index, source_content, page, start_char "
+            "FROM document_chunks WHERE document_id = $1 "
+            "ORDER BY chunk_index",
+            doc_id,
+        )
+        if not rows:
+            return
+        chunks = [
+            ChunkRecord(
+                id=r["id"], chunk_index=r["chunk_index"],
+                source_content=r["source_content"] or "",
+                page=r["page"], start_char=r["start_char"],
+            )
+            for r in rows
+        ]
+        affected = all_affected_chunks(chunks, old_highlights, new_highlights)
+        if not affected:
+            return
+
+        for chunk, anno_text, has_hl, new_content in iter_chunks_with_annotations(
+            chunks, affected, new_highlights,
+        ):
+            await conn.execute(
+                "UPDATE document_chunks "
+                "SET annotations_text = $1, has_highlight = $2, content = $3 "
+                "WHERE id = $4",
+                anno_text, has_hl, new_content, chunk.id,
+            )
 
     async def _validate_kb(self, kb_id: str) -> None:
         kb = await self.pool.fetchval(

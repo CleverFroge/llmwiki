@@ -7,6 +7,7 @@
 //       type: "text" | "pdf",
 //       anchor:     { xpath, endXPath?, startOffset, endOffset, textContent, prefix?, suffix? } | null,
 //       textAnchor: { textStart, textEnd, textContent, prefix?, suffix? }                    | null,
+//       pdfAnchor:  { page, textContent, prefix?, suffix?, rects }                           | null,
 //       comment: string | null,
 //       color: "yellow",
 //       createdAt: ISO,
@@ -14,10 +15,9 @@
 //     ...
 //   ]
 //
-// `anchor` is the DOM-relative anchor used by the Chrome extension to re-apply
-// highlights on the live page. `textAnchor` is the plaintext-relative anchor
-// computed by the API at save time, used by this viewer to render highlights
-// as ProseMirror decorations on the parsed markdown content.
+// These are all the same user-facing feature. The separate anchor fields are
+// resolver metadata for different surfaces: live-page DOM, parsed markdown,
+// and PDF canvas/text-layer rendering.
 
 export interface DomAnchor {
   xpath: string

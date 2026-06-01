@@ -11,9 +11,7 @@ from urllib.parse import urlparse
 from html_parser import Image
 
 
-MAX_IMAGES = 12
-MAX_IMAGE_BYTES = 2_500_000
-MAX_TOTAL_BYTES = 6_000_000
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 IMAGE_TIMEOUT = 10
 IMAGE_CONCURRENCY = 6
 
@@ -72,10 +70,8 @@ async def materialize_webclip_assets(
 
     sem = asyncio.Semaphore(IMAGE_CONCURRENCY)
     assets_by_ref: dict[str, WebclipAsset] = {}
-    total_bytes = 0
 
     async def fetch_one(index: int, image: Image) -> None:
-        nonlocal total_bytes
         if not image.ref:
             return
         if not image.url.startswith("data:"):
@@ -90,10 +86,6 @@ async def materialize_webclip_assets(
             return
 
         data, content_type, fetched_url = fetched
-        if total_bytes + len(data) > MAX_TOTAL_BYTES:
-            return
-        total_bytes += len(data)
-
         ext = SAFE_MIME_EXT.get(content_type) or _guess_extension(fetched_url) or "bin"
         filename = f"image-{index:02d}.{ext}"
         src = f"{asset_dir_name}/{filename}"
@@ -112,15 +104,25 @@ async def materialize_webclip_assets(
             height=image.height or inferred_height,
         )
 
-    await asyncio.gather(*(fetch_one(i, image) for i, image in enumerate(images[:MAX_IMAGES], start=1)))
+    await asyncio.gather(*(fetch_one(i, image) for i, image in enumerate(images, start=1)))
 
     for image in sorted(images, key=lambda img: len(img.ref or ""), reverse=True):
         token = f"llmwiki-image://{image.ref}"
         asset = assets_by_ref.get(image.ref)
-        markdown = markdown.replace(token, asset.markdown_src if asset else "")
+        if asset:
+            markdown = markdown.replace(token, asset.markdown_src)
+        else:
+            markdown = _remove_markdown_image_ref(markdown, token)
 
     assets = [assets_by_ref[image.ref] for image in images if image.ref in assets_by_ref]
     return markdown, assets
+
+
+def _remove_markdown_image_ref(markdown: str, token: str) -> str:
+    escaped_token = re.escape(token)
+    image_pattern = re.compile(rf"!\[(?:\\.|[^\]])*\]\({escaped_token}\)")
+    markdown, count = image_pattern.subn("", markdown)
+    return markdown if count else markdown.replace(token, "")
 
 
 async def _fetch_image(url: str) -> tuple[bytes, str] | None:

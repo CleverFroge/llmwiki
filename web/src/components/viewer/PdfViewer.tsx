@@ -185,6 +185,16 @@ export default function PdfViewer({ fileUrl, documentId, title, className, initi
   const pageAspectRef = useRef<Map<number, number>>(new Map())
   const estimatedPageHeight = pageWidth > 0 ? pageWidth * 1.414 : 800
 
+  // react-pdf renders pages from `width`, not from our UI zoom scalar. Any
+  // PDF.js viewport used for anchor conversion must mirror the rendered width
+  // or saved PDF-space rects drift after resize / fit-width changes.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const renderedViewport = useCallback((page: any) => {
+    const base = page.getViewport({ scale: 1 })
+    const renderedWidth = pageWidth > 0 ? pageWidth : base.width
+    return page.getViewport({ scale: renderedWidth / base.width })
+  }, [pageWidth])
+
   useEffect(() => {
     const container = containerRef.current
     if (!container || !numPages) return
@@ -328,7 +338,7 @@ export default function PdfViewer({ fileUrl, documentId, title, className, initi
 
       const proxy = pageProxies.get(pageNumber)
       if (!proxy) return
-      const viewport = proxy.getViewport({ scale })
+      const viewport = renderedViewport(proxy)
       const pageText = pageTexts.get(pageNumber) ?? ''
       const computed = computePdfAnchor({ range, viewport, pageContainer: pageEl, pageText })
       if (!computed) return
@@ -351,7 +361,7 @@ export default function PdfViewer({ fileUrl, documentId, title, className, initi
       setCommentDraft('')
       setCommentExpanded(false)
     },
-    [documentId, pageProxies, pageTexts, scale, token],
+    [documentId, pageProxies, pageTexts, renderedViewport, token],
   )
 
   const handleHighlightClick = useCallback(
@@ -359,7 +369,7 @@ export default function PdfViewer({ fileUrl, documentId, title, className, initi
       if (!highlight.pdfAnchor) return
       const proxy = pageProxies.get(highlight.pdfAnchor.page)
       if (!proxy) return
-      const viewport = proxy.getViewport({ scale })
+      const viewport = renderedViewport(proxy)
       const [vpRect] = pdfRectsToViewport([highlight.pdfAnchor.rects[0]], viewport)
       setPopover({
         mode: 'edit',
@@ -375,7 +385,7 @@ export default function PdfViewer({ fileUrl, documentId, title, className, initi
       // textarea only when they actually want to edit the note.
       setCommentExpanded(false)
     },
-    [pageProxies, scale],
+    [pageProxies, renderedViewport],
   )
 
   // "Note" pressed in CREATE mode: save the highlight immediately so the
@@ -933,7 +943,7 @@ export default function PdfViewer({ fileUrl, documentId, title, className, initi
                     )}
                     {shouldRender && documentId && (
                       <PdfHighlightLayer
-                        scale={scale}
+                        pageWidth={pageWidth}
                         proxy={pageProxies.get(pageNum)}
                         highlights={pdfHighlightsByPage.get(pageNum) ?? []}
                         onHighlightClick={handleHighlightClick}
@@ -1158,16 +1168,18 @@ export default function PdfViewer({ fileUrl, documentId, title, className, initi
 }
 
 interface PdfHighlightLayerProps {
-  scale: number
+  pageWidth: number
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   proxy: any | undefined
   highlights: Highlight[]
   onHighlightClick: (h: Highlight) => void
 }
 
-function PdfHighlightLayer({ scale, proxy, highlights, onHighlightClick }: PdfHighlightLayerProps) {
+function PdfHighlightLayer({ pageWidth, proxy, highlights, onHighlightClick }: PdfHighlightLayerProps) {
   if (!proxy || highlights.length === 0) return null
-  const viewport = proxy.getViewport({ scale })
+  const base = proxy.getViewport({ scale: 1 })
+  const renderedWidth = pageWidth > 0 ? pageWidth : base.width
+  const viewport = proxy.getViewport({ scale: renderedWidth / base.width })
 
   return (
     <>

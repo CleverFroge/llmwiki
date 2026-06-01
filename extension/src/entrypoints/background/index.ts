@@ -1,5 +1,7 @@
 import { getSupabase } from "@/lib/supabase";
 import { getApiUrl } from "@/lib/settings";
+import { isAllowedApiFetchUrl, isSupportedRemoteResourceUrl } from "@/lib/security";
+import type { AuthChangeEvent, Session } from "@supabase/auth-js";
 
 type Message =
   | { type: "SIGN_IN_WITH_GOOGLE" }
@@ -26,7 +28,7 @@ export default defineBackground(() => {
   const supabase = getSupabase();
 
   // Keep session fresh across service worker restarts
-  supabase.auth.onAuthStateChange((event, _session) => {
+  supabase.auth.onAuthStateChange((event: AuthChangeEvent, _session: Session | null) => {
     console.log("[bg] auth:", event);
   });
 
@@ -73,7 +75,7 @@ export default defineBackground(() => {
     },
   ): Promise<ApiFetchResponse> {
     try {
-      if (!(await isAllowedApiFetchUrl(msg.url))) {
+      if (!isAllowedApiFetchUrl(msg.url, await getApiUrl())) {
         return { ok: false, status: 403, error: "Blocked extension fetch target" };
       }
       const res = await fetch(msg.url, {
@@ -94,17 +96,6 @@ export default defineBackground(() => {
     } catch (err) {
       const message = err instanceof Error ? err.message : "Network error";
       return { ok: false, status: 0, error: message };
-    }
-  }
-
-  async function isAllowedApiFetchUrl(url: string): Promise<boolean> {
-    try {
-      const target = new URL(url);
-      if (!["http:", "https:"].includes(target.protocol)) return false;
-      const configured = new URL(await getApiUrl());
-      return target.origin === configured.origin;
-    } catch {
-      return false;
     }
   }
 
@@ -252,8 +243,7 @@ export default defineBackground(() => {
     maxBytes = 2_500_000,
   ): Promise<{ dataUrl: string; size: number; mimeType: string } | { error: string }> {
     try {
-      const parsed = new URL(url);
-      if (!["http:", "https:"].includes(parsed.protocol)) {
+      if (!isSupportedRemoteResourceUrl(url)) {
         return { error: "Unsupported image URL" };
       }
       const response = await fetch(url, {

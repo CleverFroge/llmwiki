@@ -260,7 +260,7 @@ async def test_webclip_asset_materialization_drops_non_inlined_remote_images(mon
     )
 
     assert calls == []
-    assert markdown == "![Hero]()"
+    assert markdown == ""
     assert assets == []
 
 
@@ -281,12 +281,12 @@ async def test_webclip_asset_materialization_rejects_mismatched_image_bytes():
         "article.assets",
     )
 
-    assert markdown == "![Logo]()"
+    assert markdown == ""
     assert assets == []
 
 
 @pytest.mark.asyncio
-async def test_webclip_asset_materialization_caps_image_count():
+async def test_webclip_asset_materialization_has_no_image_count_cap():
     from html_parser.models import Image
     from services.webclip_assets import materialize_webclip_assets
 
@@ -309,10 +309,9 @@ async def test_webclip_asset_materialization_caps_image_count():
         "article.assets",
     )
 
-    assert len(assets) == 12
-    assert "llmwiki-image://IMG11" not in rewritten
-    assert "![Image 11](./article.assets/image-12.png)" in rewritten
-    assert "![Image 12]()" in rewritten
+    assert len(assets) == 20
+    assert "llmwiki-image://" not in rewritten
+    assert "![Image 19](./article.assets/image-20.png)" in rewritten
 
 
 def test_webclip_path_normalization_restricts_to_webclipper_root():

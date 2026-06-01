@@ -48,6 +48,24 @@ def _clean_annotation_text(s: str, max_len: int = 600) -> str:
     return s
 
 
+def _highlight_quote_and_page(h: dict) -> tuple[str, int | None]:
+    """Return the user-selected quote and optional page for any anchor shape.
+
+    Highlights are one user-facing feature, but different capture surfaces
+    store different resolver anchors: PDF viewer (`pdfAnchor`), parsed
+    markdown viewer (`textAnchor`), and legacy webclip DOM (`anchor`).
+    """
+    for key in ("pdfAnchor", "textAnchor", "anchor"):
+        anchor = h.get(key) or {}
+        if not isinstance(anchor, dict):
+            continue
+        text = _clean_annotation_text(anchor.get("textContent") or "")
+        if text:
+            page = anchor.get("page") if key == "pdfAnchor" else None
+            return text, page
+    return "", None
+
+
 def _materialize_highlights(doc: dict) -> str:
     """Render the highlights array as a markdown appendix for LLM context."""
     raw = doc.get("highlights")
@@ -65,14 +83,9 @@ def _materialize_highlights(doc: dict) -> str:
     for h in raw:
         if not isinstance(h, dict):
             continue
-        anchor = h.get("anchor") or {}
-        pdf_anchor = h.get("pdfAnchor") or {}
-        text = _clean_annotation_text(
-            anchor.get("textContent") or pdf_anchor.get("textContent") or ""
-        )
+        text, page = _highlight_quote_and_page(h)
         if not text:
             continue
-        page = pdf_anchor.get("page")
         suffix = f" (p.{page})" if page else ""
         comment = _clean_annotation_text(h.get("comment") or "")
         line = f"- “{text}”{suffix}"

@@ -109,7 +109,11 @@ CREATE TABLE document_chunks (
     user_id UUID NOT NULL REFERENCES users(id),
     knowledge_base_id UUID NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
     chunk_index INTEGER NOT NULL,
-    content TEXT NOT NULL CHECK (length(content) <= 10000),
+    -- `content` is the materialized form (source + annotations) used by FTS.
+    content TEXT NOT NULL,
+    source_content TEXT NOT NULL DEFAULT '' CHECK (length(source_content) <= 10000),
+    annotations_text TEXT,
+    has_highlight BOOLEAN NOT NULL DEFAULT false,
     page INTEGER,
     start_char INTEGER,
     token_count INTEGER NOT NULL,
@@ -117,6 +121,8 @@ CREATE TABLE document_chunks (
     created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     UNIQUE(document_id, chunk_index)
 );
+CREATE INDEX IF NOT EXISTS idx_chunks_annotated
+    ON document_chunks(knowledge_base_id) WHERE has_highlight = true;
 
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS stale_since TIMESTAMPTZ;
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS highlights JSONB NOT NULL DEFAULT '[]'::jsonb;

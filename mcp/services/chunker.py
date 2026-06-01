@@ -125,12 +125,18 @@ def _enforce_max_chars(chunks: list[Chunk]) -> list[Chunk]:
                 header_breadcrumb=c.header_breadcrumb,
             ))
             continue
+        # Each split piece gets its own start_char so text-anchor highlight
+        # mapping can compute correct end offsets per piece. Mirrors the
+        # fix in api/services/chunker.py.
+        base = c.start_char or 0
+        offset = 0
         for piece in _split_oversized(c.content):
             result.append(Chunk(
                 index=len(result), content=piece, page=c.page,
-                start_char=c.start_char, token_count=_estimate_tokens(piece),
+                start_char=base + offset, token_count=_estimate_tokens(piece),
                 header_breadcrumb=c.header_breadcrumb,
             ))
+            offset += len(piece)
     return result
 
 
@@ -166,11 +172,13 @@ async def store_chunks_pg(
     await conn.execute("DELETE FROM document_chunks WHERE document_id = $1", document_id)
     if not chunks:
         return
+    # source_content mirrors content at ingest; highlight CRUD may later
+    # rewrite content with annotations appended. See api/services/highlight_chunks.
     await conn.executemany(
         "INSERT INTO document_chunks "
-        "(document_id, user_id, knowledge_base_id, chunk_index, content, page, start_char, "
+        "(document_id, user_id, knowledge_base_id, chunk_index, content, source_content, page, start_char, "
         " token_count, header_breadcrumb) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9)",
         [
             (document_id, user_id, knowledge_base_id, c.index, c.content, c.page,
              c.start_char, c.token_count, c.header_breadcrumb)
@@ -189,10 +197,10 @@ async def store_chunks_sqlite(
     if chunks:
         await db.executemany(
             "INSERT INTO document_chunks "
-            "(document_id, chunk_index, content, page, start_char, token_count, header_breadcrumb) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(document_id, chunk_index, content, source_content, page, start_char, token_count, header_breadcrumb) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                (document_id, c.index, c.content, c.page, c.start_char, c.token_count,
+                (document_id, c.index, c.content, c.content, c.page, c.start_char, c.token_count,
                  c.header_breadcrumb)
                 for c in chunks
             ],

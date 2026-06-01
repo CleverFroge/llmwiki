@@ -3,6 +3,7 @@
 import * as React from 'react'
 import { toast } from 'sonner'
 import { apiFetch, getDocumentsWsUrl } from '@/lib/api'
+import { refreshAccessToken } from '@/lib/auth-token'
 import { useUserStore } from '@/stores'
 import type { DocumentListItem } from '@/lib/types'
 
@@ -124,9 +125,14 @@ export function useKBDocuments(knowledgeBaseId: string) {
       ws.onclose = (e) => {
         wsRef.current = null
         if (cancelled) return
-        // 4001 = auth failure, don't reconnect
+        // 4001 = auth failure. The common cause is a tab reconnecting with a
+        // token that expired while the page was open; ask Supabase to refresh
+        // and let the accessToken dependency recreate the socket.
         if (e.code === 4001) {
-          console.error('WebSocket auth failed:', e.reason)
+          console.warn('WebSocket auth failed; refreshing token:', e.reason)
+          refreshAccessToken().catch((err) => {
+            console.error('Token refresh after WebSocket auth failure failed:', err)
+          })
           return
         }
         // Reconnect with exponential backoff

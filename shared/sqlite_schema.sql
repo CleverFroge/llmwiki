@@ -56,7 +56,15 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
     document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     chunk_index INTEGER NOT NULL,
+    -- `content` is the materialized form (source + annotations) used by FTS.
+    -- `source_content` is the immutable raw chunk text; `annotations_text`
+    -- holds the materialized footnote-body block of highlights/comments
+    -- touching this chunk, maintained by the highlight CRUD service methods.
+    -- See docs/highlights-in-search-spec.md.
     content TEXT NOT NULL,
+    source_content TEXT NOT NULL DEFAULT '',
+    annotations_text TEXT,
+    has_highlight INTEGER NOT NULL DEFAULT 0,
     page INTEGER,
     start_char INTEGER,
     token_count INTEGER NOT NULL,
@@ -101,5 +109,8 @@ CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path);
 CREATE INDEX IF NOT EXISTS idx_documents_source_kind ON documents(source_kind);
 CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(document_id);
+-- Partial index for the "search but only chunks I've annotated" filter.
+CREATE INDEX IF NOT EXISTS idx_chunks_annotated
+  ON document_chunks(document_id) WHERE has_highlight = 1;
 CREATE INDEX IF NOT EXISTS idx_refs_source ON document_references(source_document_id);
 CREATE INDEX IF NOT EXISTS idx_refs_target ON document_references(target_document_id);

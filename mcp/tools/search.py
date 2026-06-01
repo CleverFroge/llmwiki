@@ -81,18 +81,35 @@ class SearchHandler:
 
         return "\n".join(lines)
 
-    async def search_chunks(self, query: str, path: str, tags: list[str] | None, limit: int) -> str:
-        """Full-text search across document chunks."""
+    async def search_chunks(
+        self, query: str, path: str, tags: list[str] | None, limit: int,
+        annotated_only: bool = False, scope: str = "all",
+    ) -> str:
+        """Full-text search across document chunks.
+
+        `annotated_only=True` restricts to chunks the user has highlighted.
+        `scope='annotations'` matches only within the user's notes/quotes;
+        `scope='source'` matches only within original document content;
+        `scope='all'` (default) matches either.
+        """
         path_filter = self._path_filter_key(path)
 
-        matches = await self.fs.search_chunks(self.kb_id, query, limit, path_filter)
+        matches = await self.fs.search_chunks(
+            self.kb_id, query, limit, path_filter,
+            annotated_only=annotated_only, scope=scope,
+        )
 
         if tags:
             tag_set = {t.lower() for t in tags}
             matches = [m for m in matches if tag_set.issubset({t.lower() for t in (m.get("tags") or [])})]
 
         if not matches:
-            return f"No matches for `{query}` in {self.slug}."
+            scope_msg = ""
+            if scope != "all":
+                scope_msg = f" (scope: {scope})"
+            if annotated_only:
+                scope_msg = f" (annotated only{scope_msg})"
+            return f"No matches for `{query}` in {self.slug}{scope_msg}."
 
         lines = [f"**{len(matches)} result(s)** for `{query}`:\n"]
         for m in matches:
@@ -204,15 +221,31 @@ class SearchHandler:
         return f"  {doc['path']}{doc['filename']}{date_part}"
 
     def _format_search_result(self, match: dict, query: str) -> str:
-        """Format a single search result with snippet."""
+        """Format a single search result with snippet.
+
+        Snippet is taken from `content` — which already contains the
+        materialized source + annotations footnote block, so the LLM sees
+        both sides in their proper context without us re-stitching them.
+        A small marker after the header signals whether the match came
+        from the user's annotations.
+        """
         filepath = f"{match['path']}{match['filename']}"
         page_str = f" (p.{match['page']})" if match.get("page") else ""
         breadcrumb = f"\n  {match['header_breadcrumb']}" if match.get("header_breadcrumb") else ""
-        snippet = _extract_snippet(match.get("content", ""), query)
         link = deep_link(self.slug, match["path"], match["filename"])
         score = match.get("score", 0)
         score_str = f" [{score:.1f}]" if score else ""
-        return f"**{filepath}**{page_str}{score_str} — [view]({link}){breadcrumb}\n```\n{snippet}\n```\n"
+
+        marker = ""
+        if match.get("annotation_hit") and not match.get("source_hit"):
+            marker = " 🟡 your note"
+        elif match.get("annotation_hit"):
+            marker = " 🟡 your note also matched"
+        elif match.get("has_highlight"):
+            marker = " 🟡 annotated"
+
+        snippet = _extract_snippet(match.get("content", ""), query)
+        return f"**{filepath}**{page_str}{score_str}{marker} — [view]({link}){breadcrumb}\n```\n{snippet}\n```\n"
 
 
 async def _list_all_kbs(fs: VaultFS) -> str:
@@ -255,6 +288,8 @@ def register(mcp: FastMCP, get_user_id, fs_factory) -> None:
         path: str = "*",
         tags: list[str] | None = None,
         limit: int = 10,
+        annotated_only: bool = False,
+        scope: Literal["all", "annotations", "source"] = "all",
     ) -> str:
         user_id = get_user_id(ctx)
         fs = fs_factory(user_id)
@@ -273,7 +308,10 @@ def register(mcp: FastMCP, get_user_id, fs_factory) -> None:
         elif mode == "search":
             if not query:
                 return "search mode requires a query."
-            return await handler.search_chunks(query, path, tags, min(limit, MAX_SEARCH))
+            return await handler.search_chunks(
+                query, path, tags, min(limit, MAX_SEARCH),
+                annotated_only=annotated_only, scope=scope,
+            )
         elif mode == "references":
             return await handler.query_references(path, query)
 

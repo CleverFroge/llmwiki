@@ -179,16 +179,43 @@ class PostgresVaultFS(VaultFS):
         )
 
 
-    async def search_chunks(self, kb_id: str, query: str, limit: int, path_filter: str | None = None) -> list[dict]:
+    async def search_chunks(
+        self, kb_id: str, query: str, limit: int,
+        path_filter: str | None = None,
+        annotated_only: bool = False,
+        scope: str = "all",
+    ) -> list[dict]:
         path_clause = ""
         if path_filter == "wiki":
             path_clause = " AND d.path LIKE '/wiki/%%'"
         elif path_filter == "sources":
             path_clause = " AND d.path NOT LIKE '/wiki/%%'"
 
-        return await scoped_query(
+        # Always match against `content` — that's where the PGroonga index
+        # lives, and `content` already contains source + annotations
+        # materialized together. The per-side booleans below label *which
+        # side* matched so callers can post-filter by scope cheaply.
+        annotated_clause = " AND dc.has_highlight = true" if annotated_only else ""
+
+        # Push scope into SQL so the LIMIT counts only rows the user asked
+        # for. The earlier Python-side post-filter could return zero results
+        # for narrow scopes even when valid matches existed past the top-N.
+        if scope == "annotations":
+            scope_clause = (
+                " AND dc.annotations_text IS NOT NULL "
+                " AND dc.annotations_text &@~ $2"
+            )
+        elif scope == "source":
+            scope_clause = " AND dc.source_content &@~ $2"
+        else:
+            scope_clause = ""
+
+        rows = await scoped_query(
             self.user_id,
-            f"SELECT dc.content, dc.page, dc.header_breadcrumb, dc.chunk_index, "
+            f"SELECT dc.content, dc.source_content, dc.annotations_text, "
+            f"  dc.has_highlight, dc.page, dc.header_breadcrumb, dc.chunk_index, "
+            f"  (dc.source_content &@~ $2) AS source_hit, "
+            f"  (dc.annotations_text IS NOT NULL AND dc.annotations_text &@~ $2) AS annotation_hit, "
             f"  d.filename, d.title, d.path, d.file_type, d.tags, "
             f"  pgroonga_score(dc.tableoid, dc.ctid) AS score "
             f"FROM document_chunks dc "
@@ -197,11 +224,14 @@ class PostgresVaultFS(VaultFS):
             f"  AND dc.content &@~ $2 "
             f"  AND NOT d.archived"
             f"  AND d.user_id = $3"
+            f"{annotated_clause}"
+            f"{scope_clause}"
             f"{path_clause} "
             f"ORDER BY score DESC, dc.chunk_index "
             f"LIMIT $4",
             kb_id, query, self.user_id, limit,
         )
+        return rows
 
 
     async def load_source_bytes(self, doc: dict) -> bytes | None:

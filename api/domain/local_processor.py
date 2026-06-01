@@ -101,9 +101,9 @@ async def _store_chunks(db: aiosqlite.Connection, doc_id: str, chunks: list) -> 
     await db.execute("DELETE FROM document_chunks WHERE document_id = ?", (doc_id,))
     for c in chunks:
         await db.execute(
-            "INSERT INTO document_chunks (id, document_id, chunk_index, content, page, "
-            "start_char, token_count, header_breadcrumb) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), doc_id, c.index, c.content, c.page,
+            "INSERT INTO document_chunks (id, document_id, chunk_index, content, source_content, page, "
+            "start_char, token_count, header_breadcrumb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), doc_id, c.index, c.content, c.content, c.page,
              c.start_char, c.token_count, c.header_breadcrumb),
         )
 

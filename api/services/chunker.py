@@ -123,12 +123,19 @@ def _enforce_max_chars(chunks: list[Chunk]) -> list[Chunk]:
                 header_breadcrumb=c.header_breadcrumb,
             ))
             continue
+        # Each split piece gets its own start_char (base + cumulative offset)
+        # so downstream consumers (e.g. text-anchor highlight mapping) can
+        # derive each piece's end as start_char + len(content) without
+        # adjacent pieces appearing to start at the same paragraph offset.
+        base = c.start_char or 0
+        offset = 0
         for piece in _split_oversized(c.content):
             result.append(Chunk(
                 index=len(result), content=piece, page=c.page,
-                start_char=c.start_char, token_count=_estimate_tokens(piece),
+                start_char=base + offset, token_count=_estimate_tokens(piece),
                 header_breadcrumb=c.header_breadcrumb,
             ))
+            offset += len(piece)
     return result
 
 
@@ -195,10 +202,13 @@ async def _store_chunks_on_conn(
     if not chunks:
         return
 
+    # source_content seeds the immutable raw text; content starts identical
+    # but may diverge later when highlight CRUD writes annotations into the
+    # chunk via api/services/highlight_chunks.
     await conn.executemany(
         "INSERT INTO document_chunks "
-        "(document_id, user_id, knowledge_base_id, chunk_index, content, page, start_char, token_count, header_breadcrumb) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "(document_id, user_id, knowledge_base_id, chunk_index, content, source_content, page, start_char, token_count, header_breadcrumb) "
+        "VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9)",
         [
             (document_id, user_id, knowledge_base_id, c.index, c.content, c.page, c.start_char, c.token_count, c.header_breadcrumb)
             for c in chunks

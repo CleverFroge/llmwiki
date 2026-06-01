@@ -1,4 +1,4 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { AuthClient, type GoTrueClient } from "@supabase/auth-js";
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./constants";
 
 /**
@@ -18,19 +18,28 @@ const chromeStorageAdapter = {
   },
 };
 
-let _client: SupabaseClient | null = null;
+interface SupabaseAuthClient {
+  auth: GoTrueClient;
+}
 
-export function getSupabase(): SupabaseClient {
+let _client: SupabaseAuthClient | null = null;
+
+export function getSupabase(): SupabaseAuthClient {
   if (!_client) {
-    _client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: {
+    _client = {
+      auth: new AuthClient({
+        url: `${SUPABASE_URL}/auth/v1`,
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        },
         storage: chromeStorageAdapter,
         flowType: "pkce",
         autoRefreshToken: true,
         persistSession: true,
         detectSessionInUrl: false,
-      },
-    });
+      }),
+    };
   }
   return _client;
 }

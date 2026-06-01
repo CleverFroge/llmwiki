@@ -5,6 +5,7 @@ import { useEditor, EditorContent } from '@tiptap/react'
 import { Check, Loader2, MessageSquarePlus, Pencil, X } from 'lucide-react'
 
 import { apiFetch, getDocumentsWsUrl } from '@/lib/api'
+import { refreshAccessToken } from '@/lib/auth-token'
 import { useUserStore } from '@/stores'
 import { cn } from '@/lib/utils'
 import { createMarkdownExtensions } from '@/lib/tiptap/extensions'
@@ -212,6 +213,11 @@ export default function MarkdownClipViewer({ documentId, className }: Props) {
       }
       if (event?.id !== documentId || event.event !== 'UPDATE') return
       loadHighlights().catch(() => {})
+    }
+
+    ws.onclose = (event) => {
+      if (cancelled || event.code !== 4001) return
+      refreshAccessToken().catch(() => {})
     }
 
     return () => {

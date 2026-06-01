@@ -248,10 +248,23 @@ class SqliteVaultFS(VaultFS):
         return _rows_to_dicts(cursor, await cursor.fetchall())
 
 
-    async def search_chunks(self, kb_id: str, query: str, limit: int, path_filter: str | None = None) -> list[dict]:
+    async def search_chunks(
+        self, kb_id: str, query: str, limit: int,
+        path_filter: str | None = None,
+        annotated_only: bool = False,
+        scope: str = "all",
+    ) -> list[dict]:
         db = self._db_or_raise()
+        # SQLite's chunks_fts only indexes `content` (which already includes
+        # annotations after sync). Scope filtering is a Python-side
+        # substring check; to avoid scope filters returning fewer rows than
+        # requested, over-fetch by 3x when scope narrows the set, then
+        # slice to the requested limit. Acceptable at personal scale;
+        # production hosted-mode uses Postgres + PGroonga per-column matches.
+        sql_limit = limit if scope == "all" else limit * 3
         sql = (
-            "SELECT dc.content, dc.page, dc.header_breadcrumb, dc.chunk_index, "
+            "SELECT dc.content, dc.source_content, dc.annotations_text, "
+            "dc.has_highlight, dc.page, dc.header_breadcrumb, dc.chunk_index, "
             "d.filename, d.title, d.path, d.file_type, d.tags, "
             "rank as score "
             "FROM document_chunks dc "
@@ -260,15 +273,36 @@ class SqliteVaultFS(VaultFS):
             "WHERE chunks_fts MATCH ? AND d.status != 'failed' "
         )
         params: list = [query]
+        if annotated_only:
+            sql += "AND dc.has_highlight = 1 "
         if path_filter == "wiki":
             sql += "AND d.source_kind = 'wiki' "
         elif path_filter == "sources":
             sql += "AND d.source_kind != 'wiki' "
         sql += "ORDER BY rank LIMIT ?"
-        params.append(limit)
+        params.append(sql_limit)
 
         cursor = await db.execute(sql, params)
-        return _rows_to_dicts(cursor, await cursor.fetchall())
+        rows = _rows_to_dicts(cursor, await cursor.fetchall())
+
+        # Label each row + apply scope filter, then slice to `limit`.
+        q_lower = query.lower()
+        labeled: list[dict] = []
+        for r in rows:
+            src = (r.get("source_content") or "").lower()
+            ann = (r.get("annotations_text") or "").lower()
+            source_hit = q_lower in src
+            annotation_hit = bool(ann) and q_lower in ann
+            if scope == "annotations" and not annotation_hit:
+                continue
+            if scope == "source" and not source_hit:
+                continue
+            r["source_hit"] = source_hit
+            r["annotation_hit"] = annotation_hit
+            labeled.append(r)
+            if len(labeled) >= limit:
+                break
+        return labeled
 
 
     async def load_source_bytes(self, doc: dict) -> bytes | None:
