@@ -34,5 +34,16 @@ describe("extension settings helpers", () => {
       expect(isBuiltInDisabledHost("localhost")).toBe(false);
       expect(isBuiltInDisabledHost("example.com")).toBe(false);
     });
+
+    it("matches only on the dot boundary and is case-insensitive", () => {
+      expect(isBuiltInDisabledHost("LLMWIKI.APP")).toBe(true);
+      expect(isBuiltInDisabledHost("app.llmwiki.app")).toBe(true);
+      // Look-alikes that merely contain or extend the string must NOT match,
+      // or an attacker domain could pose as (or hide from) the app gate.
+      expect(isBuiltInDisabledHost("evilllmwiki.app")).toBe(false);
+      expect(isBuiltInDisabledHost("notllmwiki.app")).toBe(false);
+      expect(isBuiltInDisabledHost("llmwiki.app.evil.com")).toBe(false);
+      expect(isBuiltInDisabledHost("llmwiki-app.com")).toBe(false);
+    });
   });
 });

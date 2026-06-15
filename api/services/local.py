@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 from config import settings
 from domain.watcher import mark_written
-from infra.db.sqlite import SQLiteDocumentRepository, SQLiteChunkRepository
+from infra.db.sqlite import SQLiteDocumentRepository, SQLiteChunkRepository, serialized_write
 from services.chunker import chunk_text
 from services.webclip_assets import materialize_webclip_assets
 from .base import UserService, KBService, DocumentService, ServiceFactory
@@ -91,8 +91,13 @@ class LocalKBService(KBService):
         if not sets:
             return None
         params.append(kb_id)
-        await self.db.execute(f"UPDATE workspace SET {', '.join(sets)} WHERE id = ?", tuple(params))
-        await self.db.commit()
+        async with serialized_write():
+            try:
+                await self.db.execute(f"UPDATE workspace SET {', '.join(sets)} WHERE id = ?", tuple(params))
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
         return await self.get(kb_id)
 
     async def update_sharing(

@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 
 from config import settings
 from deps import get_user_id
+from domain.file_types import EXTRACTION_TYPES, SIMPLE_TEXT_TYPES
 from domain.watcher import mark_written
 
 router = APIRouter(tags=["upload"])
@@ -58,42 +59,44 @@ async def upload_file(
     source_kind = "wiki" if relative.startswith("wiki/") else "source"
     content_hash = hashlib.sha256(content_bytes).hexdigest()
 
-    # Read text content for simple indexable types (not HTML — that goes through webmd)
+    # HTML is excluded from inline text — it goes through webmd in process_document.
     text_content = None
-    simple_text_types = {"md", "txt", "csv", "svg", "json", "xml"}
-    needs_processing = ext in {"pdf", "pptx", "ppt", "docx", "doc", "xlsx", "xls", "html", "htm"}
-    if ext in simple_text_types:
+    needs_processing = ext in EXTRACTION_TYPES
+    if ext in SIMPLE_TEXT_TYPES:
         try:
             text_content = content_bytes.decode("utf-8", errors="replace")
         except Exception:
             pass
 
     # Index into SQLite
-    from infra.db.sqlite import SQLiteDocumentRepository, SQLiteChunkRepository
+    import json
+    from infra.db.sqlite import SQLiteDocumentRepository, SQLiteChunkRepository, serialized_write
     db = request.app.state.sqlite_db
     doc_repo = SQLiteDocumentRepository(db)
     chunk_repo = SQLiteChunkRepository(db)
 
     doc_id = str(uuid.uuid4())
 
-    # Auto-assign document_number
-    cursor = await db.execute("SELECT COALESCE(MAX(document_number), 0) + 1 FROM documents")
-    row = await cursor.fetchone()
-    doc_number = row[0]
-
-    import json
-    await db.execute(
-        "INSERT INTO documents (id, user_id, filename, title, path, relative_path, "
-        "source_kind, file_type, file_size, status, content, tags, version, "
-        "content_hash, mtime_ns, last_indexed_at, document_number) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 0, ?, ?, datetime('now'), ?)",
-        (doc_id, user_id, filename, title, dir_path, relative, source_kind,
-         ext or "bin", len(content_bytes),
-         "ready" if text_content is not None else "pending",
-         text_content, content_hash,
-         int(dest.stat().st_mtime_ns), doc_number),
-    )
-    await db.commit()
+    async with serialized_write():
+        try:
+            cursor = await db.execute("SELECT COALESCE(MAX(document_number), 0) + 1 FROM documents")
+            row = await cursor.fetchone()
+            doc_number = row[0]
+            await db.execute(
+                "INSERT INTO documents (id, user_id, filename, title, path, relative_path, "
+                "source_kind, file_type, file_size, status, content, tags, version, "
+                "content_hash, mtime_ns, last_indexed_at, document_number) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 0, ?, ?, datetime('now'), ?)",
+                (doc_id, user_id, filename, title, dir_path, relative, source_kind,
+                 ext or "bin", len(content_bytes),
+                 "ready" if text_content is not None else "pending",
+                 text_content, content_hash,
+                 int(dest.stat().st_mtime_ns), doc_number),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     # Chunk text content or kick off processing for non-text files
     if text_content:
@@ -104,11 +107,9 @@ async def upload_file(
         chunks = chunk_text(text_content)
         await chunk_repo.store(doc_id, user_id, kb_id, chunks)
     elif needs_processing:
-        # PDF, Office, spreadsheet, HTML: process in background
         import asyncio
-        from pathlib import Path as P
-        from domain.local_processor import process_document
-        asyncio.create_task(process_document(db, doc_id, P(settings.WORKSPACE_PATH).resolve()))
+        from domain.local_processor import process_document_isolated
+        asyncio.create_task(process_document_isolated(_workspace_root(), doc_id))
 
     doc = await doc_repo.get(doc_id)
     return doc

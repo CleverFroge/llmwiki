@@ -75,7 +75,8 @@ class PostgresVaultFS(VaultFS):
                     row = await conn.fetchrow(
                         "INSERT INTO documents (knowledge_base_id, user_id, filename, title, path, "
                         "file_type, status, content, tags, date, metadata, version) "
-                        "VALUES ($1, $2, $3, $4, $5, $6, 'ready', $7, $8, $9, $10::jsonb, 1) "
+                        "SELECT $1, $2, $3, $4, $5, $6, 'ready', $7, $8, $9, $10::jsonb, 1 "
+                        "WHERE EXISTS (SELECT 1 FROM knowledge_bases WHERE id = $1 AND user_id = $2) "
                         "RETURNING id, filename, path",
                         kb_id, self.user_id, filename, title, dir_path, file_type, content, tags,
                         date, _json.dumps(metadata) if metadata else None,
@@ -83,9 +84,11 @@ class PostgresVaultFS(VaultFS):
                 except asyncpg.UniqueViolationError as e:
                     # Only re-raise as DuplicateDocumentError for the path/filename index.
                     # Any other unique violation is a different bug worth surfacing.
-                    if getattr(e, "constraint_name", "") == "idx_documents_unique_active":
+                    if e.constraint_name == "idx_documents_unique_active":
                         raise DuplicateDocumentError(dir_path, filename)
                     raise
+                if row is None:
+                    raise PermissionError(f"knowledge base {kb_id} not owned by user")
                 if file_type in ("md", "txt"):
                     chunks = chunk_text(content or "")
                     await store_chunks_pg(conn, str(row["id"]), self.user_id, kb_id, chunks)
@@ -130,7 +133,7 @@ class PostgresVaultFS(VaultFS):
                         conn, str(row["id"]), self.user_id,
                         str(row["knowledge_base_id"]), chunks,
                     )
-        return {"id": row["id"], "filename": row["filename"], "path": row["path"]} if row and title is not None else None
+        return {"id": row["id"], "filename": row["filename"], "path": row["path"]} if row else None
 
     async def archive_documents(self, doc_ids: list[str]) -> int:
         result = await service_execute(
@@ -187,9 +190,9 @@ class PostgresVaultFS(VaultFS):
     ) -> list[dict]:
         path_clause = ""
         if path_filter == "wiki":
-            path_clause = " AND d.path LIKE '/wiki/%%'"
+            path_clause = " AND d.path LIKE '/wiki/%'"
         elif path_filter == "sources":
-            path_clause = " AND d.path NOT LIKE '/wiki/%%'"
+            path_clause = " AND d.path NOT LIKE '/wiki/%'"
 
         # Always match against `content` — that's where the PGroonga index
         # lives, and `content` already contains source + annotations
@@ -333,7 +336,7 @@ class PostgresVaultFS(VaultFS):
             "SELECT d.filename, d.title, d.path, d.file_type "
             "FROM documents d "
             "WHERE d.knowledge_base_id = $1 AND NOT d.archived AND d.user_id = $2 "
-            "  AND d.path NOT LIKE '/wiki/%%' "
+            "  AND d.path NOT LIKE '/wiki/%' "
             "  AND d.id NOT IN (SELECT target_document_id FROM document_references WHERE reference_type = 'cites') "
             "ORDER BY d.filename",
             kb_id, self.user_id,

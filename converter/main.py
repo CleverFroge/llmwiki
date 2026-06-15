@@ -1,5 +1,6 @@
 import os
 import sys
+import hmac
 import json
 import signal
 import asyncio
@@ -27,6 +28,10 @@ SUPPORTED_EXTENSIONS = OFFICE_EXTENSIONS | PDF_EXTENSIONS
 CONVERT_TIMEOUT = 120  # LibreOffice subprocess timeout (seconds)
 EXTRACT_TIMEOUT = 180  # opendataloader extraction timeout (seconds)
 MAX_SOURCE_BYTES = 200 * 1024 * 1024  # 200 MB — hard cap on downloaded file size
+# Defense-in-depth cap on the page-assembly loop. `number of pages` comes from
+# the untrusted PDF; a crafted /Count would otherwise drive an unbounded loop
+# that runs after the subprocess timeout no longer applies.
+MAX_PAGES = 10_000
 # Concurrent /extract jobs allowed at once. Each can spawn LibreOffice + a JVM,
 # so unbounded concurrency OOMs the container. Tune per container memory.
 MAX_CONCURRENT_EXTRACTIONS = int(os.environ.get("MAX_CONCURRENT_EXTRACTIONS", "2"))
@@ -172,6 +177,9 @@ def _extract_pages(pdf_path: str, output_dir: str) -> list[dict]:
         data = json.load(f)
 
     total_pages = data.get("number of pages", 0)
+    if not isinstance(total_pages, int) or total_pages < 0:
+        total_pages = 0
+    total_pages = min(total_pages, MAX_PAGES)
     elements = data.get("kids", [])
     page_elements: dict[int, list[dict]] = defaultdict(list)
 
@@ -279,7 +287,7 @@ async def extract(
     """
     if CONVERTER_SECRET:
         expected = f"Bearer {CONVERTER_SECRET}"
-        if authorization != expected:
+        if not hmac.compare_digest(authorization, expected):
             raise HTTPException(401, "Unauthorized")
 
     ext = req.source_ext.lower()

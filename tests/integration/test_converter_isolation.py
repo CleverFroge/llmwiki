@@ -71,7 +71,8 @@ async def test_s3_key_isolation_ignores_filename_and_path_metadata(monkeypatch, 
 
     tus._uploads.clear()
     temp_path = tmp_path / "upload.bin"
-    temp_path.write_bytes(b"tenant-a")
+    # 8 bytes, valid PDF magic — finalize now magic-byte-validates before upload.
+    temp_path.write_bytes(b"%PDF-1.4")
 
     upload = tus.TusUpload(
         upload_id="upload-1",
@@ -264,12 +265,20 @@ async def test_process_opendataloader_uses_isolated_tempdirs_under_concurrency(m
         time.sleep(0.02)
         return [(1, Path(pdf_path).read_text(encoding="utf-8"), [])]
 
-    async def fake_store_extracted_pages(document_id, user_id, kb_id, page_contents, parser, page_elements=None):
+    async def fake_store_extracted_pages(document_id, user_id, kb_id, page_contents, parser, page_elements=None, assets=None):
         stored.append((document_id, user_id, page_contents, parser))
+
+    async def fake_build_pdf_assets(document_id, pages_with_images):
+        return [], {}
+
+    async def fake_upload_assets(user_id, assets):
+        return None
 
     monkeypatch.setattr(ocr.tempfile, "TemporaryDirectory", RecordingTemporaryDirectory)
     monkeypatch.setattr(ocr, "extract_pdf", fake_extract_pdf)
     monkeypatch.setattr(service, "_store_extracted_pages", fake_store_extracted_pages)
+    monkeypatch.setattr(service, "_build_pdf_assets", fake_build_pdf_assets)
+    monkeypatch.setattr(service, "_upload_assets", fake_upload_assets)
 
     await asyncio.gather(
         service._process_opendataloader("doc-a", "user-a", "kb-a", "user-a/doc-a/source.pdf"),

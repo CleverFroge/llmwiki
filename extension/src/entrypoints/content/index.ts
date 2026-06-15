@@ -73,6 +73,11 @@ const LAZY_IMAGE_SRCSET_ATTRIBUTES = [
   "data-lazy-srcset",
 ];
 
+interface SessionResponse {
+  accessToken: string | null;
+  userId: string | null;
+}
+
 interface PendingPageState {
   url: string;
   title: string;
@@ -200,18 +205,29 @@ function injectStyle(): void {
       border-radius: 6px;
       padding: 5px 10px;
       font: 500 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      transition: background-color .12s ease, color .12s ease;
     }
     .llmwiki-popover .llmwiki-save {
       background: #111;
       color: #fff;
     }
+    .llmwiki-popover .llmwiki-save:hover {
+      background: #000;
+    }
     .llmwiki-popover .llmwiki-cancel {
       background: transparent;
       color: #555;
     }
+    .llmwiki-popover .llmwiki-cancel:hover {
+      background: #f1f1f1;
+      color: #111;
+    }
     .llmwiki-popover .llmwiki-delete {
       background: transparent;
       color: #b00020;
+    }
+    .llmwiki-popover .llmwiki-delete:hover {
+      background: #fdecef;
     }
     .llmwiki-toast {
       position: fixed;
@@ -375,7 +391,13 @@ class HighlightController {
   }
 
   private async ensureSession(): Promise<string | null> {
-    const session = await chrome.runtime.sendMessage({ type: "GET_SESSION" });
+    // Local mode is intentionally unauthenticated, so never hand the cloud
+    // Supabase token to a user-configured local URL.
+    if (this.mode === "local") {
+      this.accessToken = null;
+      return null;
+    }
+    const session: SessionResponse | undefined = await chrome.runtime.sendMessage({ type: "GET_SESSION" });
     this.accessToken = session?.accessToken ?? null;
     return this.accessToken;
   }
@@ -435,14 +457,16 @@ class HighlightController {
       if (fresh.highlights && fresh.highlights.length) {
         this.highlights = fresh.highlights;
       }
-    } catch {
+    } catch (err) {
+      console.warn("[llmwiki] refresh after save failed; resetting version:", err);
       this.version = 0;
     }
     // Flush any pending in-memory highlights that were captured pre-save
     if (flushPending && this.highlights.length) this.scheduleSave();
   }
 
-  private onRuntimeMessage = (msg: { type: string; documentId?: string }, _sender: any, sendResponse: (r: unknown) => void) => {
+  private onRuntimeMessage = (msg: { type: string; documentId?: string }, sender: chrome.runtime.MessageSender, sendResponse: (r: unknown) => void) => {
+    if (sender.id !== chrome.runtime.id) return false;
     if (msg.type === "GET_PAGE_HIGHLIGHTS") {
       sendResponse({ highlights: this.highlights });
       return true;
@@ -590,6 +614,7 @@ class HighlightController {
   ) {
     const highlight = this.highlights.find((h) => h.id === id);
     if (!highlight) return;
+    this.removePill();
     this.removePopover();
     const popover = document.createElement("div");
     popover.className = "llmwiki-popover";
@@ -637,6 +662,7 @@ class HighlightController {
   ) {
     const highlight = this.highlights.find((h) => h.id === id);
     if (!highlight) return;
+    this.removePill();
     this.removePopover();
     const rect = mark.getBoundingClientRect();
     const popover = document.createElement("div");

@@ -73,6 +73,14 @@ class TestParsePageRange:
         from tools.helpers import parse_page_range
         assert parse_page_range("abc,2,xyz", 10) == [2]
 
+    def test_malformed_range_does_not_crash(self):
+        from tools.helpers import parse_page_range
+        # An LLM emitting "5-" (page 5 onward) or "-5" (up to 5) must not raise.
+        assert parse_page_range("1-", 10) == []
+        assert parse_page_range("-5", 10) == []
+        assert parse_page_range("1-x", 10) == []
+        assert parse_page_range("2-4,9-", 10) == [2, 3, 4]
+
     def test_mixed(self):
         from tools.helpers import parse_page_range
         assert parse_page_range("1-3,7,5-6", 10) == [1, 2, 3, 5, 6, 7]

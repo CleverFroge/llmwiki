@@ -35,7 +35,7 @@ export default function App() {
   const authNoticeTimer = useRef<number | null>(null);
 
   useEffect(() => {
-    init();
+    init().catch(() => setAuth({ status: "signed_out" }));
     detectCurrentHost();
   }, []);
 
@@ -104,14 +104,20 @@ export default function App() {
   }
 
   async function checkSession() {
-    const { accessToken } = await chrome.runtime.sendMessage({
-      type: "GET_SESSION",
-    });
-    if (accessToken) {
-      setAuth({ status: "signed_in", accessToken });
-    } else {
-      setAuth({ status: "signed_out" });
+    // MV3 service worker may be cold; sendMessage can reject or resolve
+    // undefined until it wakes, so retry instead of hanging on "loading".
+    let response: { accessToken?: string | null } | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        response = await chrome.runtime.sendMessage({ type: "GET_SESSION" });
+      } catch {
+        response = undefined;
+      }
+      if (response !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 150));
     }
+    const accessToken = response?.accessToken ?? null;
+    setAuth(accessToken ? { status: "signed_in", accessToken } : { status: "signed_out" });
   }
 
   async function handleSignIn() {

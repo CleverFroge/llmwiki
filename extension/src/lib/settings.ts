@@ -88,6 +88,10 @@ export async function setSelectedFolderPath(path: string): Promise<void> {
   await chrome.storage.local.set({ [SELECTED_FOLDER_KEY]: normalizeFolderPath(path) });
 }
 
+export async function clearAccountSelections(): Promise<void> {
+  await chrome.storage.local.remove([SELECTED_KB_KEY, SELECTED_FOLDER_KEY]);
+}
+
 export function normalizeFolderPath(path: string): string {
   let value = (path || "/webclipper/").trim();
   if (!value.startsWith("/")) value = `/${value}`;

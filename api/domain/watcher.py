@@ -20,16 +20,13 @@ from pathlib import Path
 
 import aiosqlite
 
+from domain.file_types import SIMPLE_TEXT_TYPES
+
 logger = logging.getLogger(__name__)
 
 IGNORE_DIRS = frozenset({
     ".llmwiki", ".git", "node_modules", "__pycache__", ".venv", "venv",
     ".idea", ".vscode", ".DS_Store",
-})
-
-TEXT_EXTENSIONS = frozenset({
-    "md", "txt", "csv", "html", "svg", "json", "xml", "yaml", "yml",
-    "toml", "ini", "cfg", "rst", "tex", "latex",
 })
 
 COOLDOWN_SECONDS = 2.0
@@ -139,7 +136,7 @@ async def _index_file(db: aiosqlite.Connection, workspace: Path, file_path: Path
 
     # Read content for text files
     content = None
-    if ext in TEXT_EXTENSIONS:
+    if ext in SIMPLE_TEXT_TYPES:
         try:
             content = file_path.read_text(encoding="utf-8", errors="replace")
         except Exception:
@@ -173,11 +170,18 @@ async def _index_file(db: aiosqlite.Connection, workspace: Path, file_path: Path
         )
         await db.commit()
         logger.info("Re-indexed (modified): %s", relative)
-        # Re-process non-text files
-        if ext not in TEXT_EXTENSIONS and ext:
-            from domain.local_processor import process_document as _process
-            import asyncio
-            asyncio.create_task(_process(db, doc_id, workspace))
+        if ext not in SIMPLE_TEXT_TYPES and ext:
+            await db.execute(
+                "UPDATE documents SET status = 'pending', parser = NULL, error_message = NULL, "
+                "updated_at = datetime('now') WHERE id = ?",
+                (doc_id,),
+            )
+            await db.commit()
+            from domain.local_processor import process_document_isolated
+            asyncio.create_task(process_document_isolated(workspace, doc_id))
+        elif content is not None:
+            from domain.local_processor import chunk_text_document
+            await chunk_text_document(db, doc_id, content)
         return
     else:
         # Create new
@@ -200,13 +204,15 @@ async def _index_file(db: aiosqlite.Connection, workspace: Path, file_path: Path
              int(stat.st_mtime_ns), doc_number),
         )
         logger.info("Indexed (new): %s", relative)
-        # Process non-text files (PDFs, spreadsheets, images, HTML)
         if status == "pending":
-            from domain.local_processor import process_document as _process
-            import asyncio
-            asyncio.create_task(_process(db, doc_id, workspace))
+            from domain.local_processor import process_document_isolated
+            asyncio.create_task(process_document_isolated(workspace, doc_id))
 
     await db.commit()
+
+    if status == "ready" and content is not None:
+        from domain.local_processor import chunk_text_document
+        await chunk_text_document(db, doc_id, content)
 
 
 async def _remove_file(db: aiosqlite.Connection, workspace: Path, file_path: Path) -> None:

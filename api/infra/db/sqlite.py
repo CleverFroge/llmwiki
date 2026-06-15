@@ -4,9 +4,12 @@ Single-user, no RLS. FTS5 for full-text search.
 All queries use native SQLite syntax — no translation layer.
 """
 
+import asyncio
+import functools
 import json
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
@@ -45,14 +48,54 @@ def _row_to_dict(cursor: aiosqlite.Cursor, row: tuple) -> dict:
     return d
 
 
-async def create_pool(db_path: str) -> aiosqlite.Connection:
+def rows_to_dicts(cursor: aiosqlite.Cursor, rows: list[tuple]) -> list[dict]:
+    """Map a fetched result set to dicts, decoding JSON columns like _row_to_dict."""
+    return [_row_to_dict(cursor, r) for r in rows]
+
+
+# Local-mode requests share one aiosqlite connection, so a committing write
+# in one request could otherwise flush another's open transaction. This lock
+# serializes write spans; reads don't take it.
+_write_lock = asyncio.Lock()
+
+
+def _serialized(method):
+    """Hold the write lock for the full span of a committing repo method.
+
+    Rolls back on failure so a crashed write never leaves an open transaction
+    for the next writer to commit.
+    """
+    @functools.wraps(method)
+    async def wrapper(self, *args, **kwargs):
+        async with _write_lock:
+            try:
+                return await method(self, *args, **kwargs)
+            except Exception:
+                try:
+                    await self._db.rollback()
+                except Exception:
+                    pass
+                raise
+    return wrapper
+
+
+@asynccontextmanager
+async def serialized_write():
+    """Hold the local write lock around a multi-statement write outside the repos."""
+    async with _write_lock:
+        yield
+
+
+async def create_pool(db_path: str, init_schema: bool = True) -> aiosqlite.Connection:
     db = await aiosqlite.connect(db_path)
     db.row_factory = None
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA foreign_keys=ON")
-    schema = _SCHEMA_PATH.read_text(encoding='utf-8')
-    await db.executescript(schema)
-    await db.commit()
+    await db.execute("PRAGMA busy_timeout=5000")
+    if init_schema:
+        schema = _SCHEMA_PATH.read_text(encoding='utf-8')
+        await db.executescript(schema)
+        await db.commit()
     return db
 
 
@@ -109,6 +152,7 @@ class SQLiteDocumentRepository:
         row = await cursor.fetchone()
         return _row_to_dict(cursor, row) if row else None
 
+    @_serialized
     async def create_note(
         self, kb_id: str, user_id: str, filename: str, path: str,
         title: str, content: str, tags: list[str],
@@ -133,6 +177,7 @@ class SQLiteDocumentRepository:
         await self._db.commit()
         return await self.get(doc_id)
 
+    @_serialized
     async def update_content(self, doc_id: str, user_id: str, content: str) -> dict | None:
         cursor = await self._db.execute(
             "UPDATE documents SET content = ?, version = version + 1, "
@@ -144,6 +189,7 @@ class SQLiteDocumentRepository:
         await self._db.commit()
         return _row_to_dict(cursor, row) if row else None
 
+    @_serialized
     async def update_metadata(self, doc_id: str, user_id: str, **fields) -> dict | None:
         updates = []
         params = []
@@ -169,6 +215,7 @@ class SQLiteDocumentRepository:
         await self._db.commit()
         return await self.get(doc_id)
 
+    @_serialized
     async def archive(self, doc_id: str, user_id: str) -> bool:
         await self._db.execute("DELETE FROM document_pages WHERE document_id = ?", (doc_id,))
         await self._db.execute("DELETE FROM document_chunks WHERE document_id = ?", (doc_id,))
@@ -178,6 +225,7 @@ class SQLiteDocumentRepository:
         await self._db.commit()
         return cursor.rowcount > 0
 
+    @_serialized
     async def bulk_archive(self, doc_ids: list[str], user_id: str) -> None:
         if not doc_ids:
             return
@@ -223,6 +271,7 @@ class SQLiteDocumentRepository:
         result["highlights"] = self._parse_highlights(result.get("highlights"))
         return result
 
+    @_serialized
     async def replace_highlights(
         self, doc_id: str, user_id: str, highlights: list[dict],
         expected_version: int | None = None,
@@ -269,6 +318,7 @@ class SQLiteDocumentRepository:
                 pass
             raise
 
+    @_serialized
     async def upsert_highlight(
         self, doc_id: str, user_id: str, highlight: dict,
         expected_version: int | None = None,
@@ -332,6 +382,7 @@ class SQLiteDocumentRepository:
                 pass
             raise
 
+    @_serialized
     async def delete_highlight(
         self, doc_id: str, user_id: str, highlight_id: str,
         expected_version: int | None = None,
@@ -431,6 +482,7 @@ class SQLiteDocumentRepository:
                 (anno_text, 1 if has_hl else 0, new_content, chunk.id),
             )
 
+    @_serialized
     async def set_metadata_field(self, doc_id: str, key: str, value) -> None:
         cursor = await self._db.execute(
             "SELECT metadata FROM documents WHERE id = ?", (doc_id,),
@@ -463,6 +515,7 @@ class SQLiteDocumentRepository:
             return []
         return parsed if isinstance(parsed, list) else []
 
+    @_serialized
     async def update_status(self, doc_id: str, status: str, **fields) -> None:
         updates = ["status = ?"]
         params = [status]
@@ -487,6 +540,7 @@ class SQLiteDocumentRepository:
         row = await cursor.fetchone()
         return _row_to_dict(cursor, row) if row else None
 
+    @_serialized
     async def create_upload(
         self, doc_id: str, kb_id: str, user_id: str, filename: str,
         path: str, title: str, file_type: str, file_size: int,
@@ -509,6 +563,7 @@ class SQLiteDocumentRepository:
         )
         await self._db.commit()
 
+    @_serialized
     async def create_asset(
         self, doc_id: str, user_id: str, filename: str, path: str,
         title: str, file_type: str, file_size: int, metadata: dict,
@@ -568,6 +623,7 @@ class SQLiteKBRepository:
         row = await cursor.fetchone()
         return row[0] if row else None
 
+    @_serialized
     async def create(self, user_id: str, name: str, slug: str, description: str | None) -> dict:
         # Enforce singleton: return existing workspace if one exists
         cursor = await self._db.execute("SELECT id FROM workspace LIMIT 1")
@@ -583,6 +639,7 @@ class SQLiteKBRepository:
         await self._db.commit()
         return await self.get(ws_id, user_id)
 
+    @_serialized
     async def update(self, kb_id: str, user_id: str, **fields) -> dict | None:
         allowed = {"name", "description"}
         updates = []
@@ -611,6 +668,7 @@ class SQLiteChunkRepository:
     def __init__(self, db: aiosqlite.Connection):
         self._db = db
 
+    @_serialized
     async def store(self, doc_id: str, user_id: str, kb_id: str, chunks: list) -> None:
         await self._db.execute("DELETE FROM document_chunks WHERE document_id = ?", (doc_id,))
         if not chunks:
@@ -686,6 +744,7 @@ class SQLitePageRepository:
         rows = await cursor.fetchall()
         return [_row_to_dict(cursor, r) for r in rows]
 
+    @_serialized
     async def store_pages(self, doc_id: str, pages: list[tuple]) -> None:
         await self._db.execute("DELETE FROM document_pages WHERE document_id = ?", (doc_id,))
         if not pages:
@@ -733,6 +792,7 @@ class SQLiteUserRepository:
     async def set_onboarded(self, user_id: str) -> None:
         pass  # Always onboarded in local mode
 
+    @_serialized
     async def ensure_exists(self, user_id: str, email: str = "local@localhost") -> None:
         cursor = await self._db.execute("SELECT id FROM workspace LIMIT 1")
         if not await cursor.fetchone():

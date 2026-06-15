@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import webbrowser
 from pathlib import Path
 
@@ -159,9 +160,12 @@ def _index_existing_files(ws: Path, db_path: Path, user_id: str, ws_id: str) -> 
             stem = filename.rsplit(".", 1)[0] if "." in filename else filename
             title = stem.replace("-", " ").replace("_", " ").strip().title()
 
-            # Read content for text files
+            # Keep in sync with domain.file_types.SIMPLE_TEXT_TYPES
             content = None
-            text_types = {"md", "txt", "csv", "html", "svg", "json", "xml"}
+            text_types = {
+                "md", "txt", "csv", "svg", "json", "xml",
+                "yaml", "yml", "toml", "ini", "cfg", "rst", "tex", "latex",
+            }
             if ext in text_types:
                 try:
                     content = full.read_text(encoding="utf-8", errors="replace")
@@ -238,19 +242,35 @@ def cmd_serve(workspace: str, open_browser: bool = True) -> None:
         env=web_env,
     )
 
-    if open_browser:
-        import time
-        time.sleep(3)
-        webbrowser.open("http://localhost:3000/wikis")
+    _supervise(api_proc, web_proc, open_browser)
 
+
+def _supervise(api_proc: subprocess.Popen, web_proc: subprocess.Popen, open_browser: bool) -> None:
+    """Run until either server exits or the user interrupts, then stop both."""
     try:
-        api_proc.wait()
+        if open_browser:
+            time.sleep(3)
+            webbrowser.open("http://localhost:3000/wikis")
+        while True:
+            time.sleep(0.5)
+            if api_proc.poll() is not None:
+                print("\nAPI server exited — shutting down web server.", file=sys.stderr)
+                break
+            if web_proc.poll() is not None:
+                print("\nWeb server exited — shutting down API server.", file=sys.stderr)
+                break
     except KeyboardInterrupt:
         print("\nShutting down...")
-        api_proc.terminate()
-        web_proc.terminate()
-        api_proc.wait()
-        web_proc.wait()
+    finally:
+        for proc in (api_proc, web_proc):
+            if proc.poll() is None:
+                proc.terminate()
+        for proc in (api_proc, web_proc):
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
 
 def cmd_open(workspace: str) -> None:
@@ -365,7 +385,7 @@ def main():
     elif args.command == "mcp":
         cmd_mcp(args.workspace)
     elif args.command == "mcp-config":
-        cmd_mcp_config(args.workspace, getattr(args, "name", None))
+        cmd_mcp_config(args.workspace, args.name)
     elif args.command == "reindex":
         cmd_reindex(args.workspace)
 

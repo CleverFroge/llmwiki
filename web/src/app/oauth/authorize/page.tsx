@@ -5,15 +5,36 @@ import { Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { Loader2, Shield, Check, X } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
+import { Button } from '@/components/ui/button'
+
+interface AuthorizationDetails {
+  client?: { name?: string }
+  scopes?: string[]
+}
+
+interface OAuthDecisionResult {
+  data?: { redirect_to?: string; redirect_uri?: string; url?: string } | null
+  error?: { message?: string } | null
+}
+
+interface OAuthDetailsResult {
+  data?: AuthorizationDetails | null
+  error?: { message?: string } | null
+}
+
+interface OAuthAuthClient {
+  oauth: {
+    getAuthorizationDetails: (id: string) => Promise<OAuthDetailsResult>
+    approveAuthorization: (id: string) => Promise<OAuthDecisionResult>
+    denyAuthorization: (id: string) => Promise<OAuthDecisionResult>
+  }
+}
 
 function OAuthConsentContent() {
   const searchParams = useSearchParams()
   const authorizationId = searchParams.get('authorization_id')
 
-  const [details, setDetails] = React.useState<{
-    client?: { name?: string }
-    scopes?: string[]
-  } | null>(null)
+  const [details, setDetails] = React.useState<AuthorizationDetails | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
   const [submitting, setSubmitting] = React.useState(false)
@@ -27,6 +48,7 @@ function OAuthConsentContent() {
     }
 
     const supabase = createClient()
+    const auth = supabase.auth as unknown as OAuthAuthClient
 
     supabase.auth.getUser().then(async ({ data: { user } }) => {
       if (!user) {
@@ -36,10 +58,10 @@ function OAuthConsentContent() {
       }
 
       try {
-        const { data, error: fetchError } = await (supabase.auth as any).oauth.getAuthorizationDetails(authorizationId)
+        const { data, error: fetchError } = await auth.oauth.getAuthorizationDetails(authorizationId)
         if (fetchError) throw fetchError
-        setDetails(data)
-      } catch (err: any) {
+        setDetails(data ?? null)
+      } catch (err: unknown) {
         console.error('Failed to get authorization details:', err)
       } finally {
         setLoading(false)
@@ -53,7 +75,8 @@ function OAuthConsentContent() {
     setError(null)
     try {
       const supabase = createClient()
-      const result = await (supabase.auth as any).oauth.approveAuthorization(authorizationId)
+      const auth = supabase.auth as unknown as OAuthAuthClient
+      const result = await auth.oauth.approveAuthorization(authorizationId)
       if (result.error) throw result.error
       const redirectUrl = result.data?.redirect_to || result.data?.redirect_uri || result.data?.url
       if (redirectUrl) {
@@ -61,8 +84,8 @@ function OAuthConsentContent() {
       } else {
         setSuccess('Access granted successfully.')
       }
-    } catch (err: any) {
-      setError(err?.message || 'Failed to approve authorization.')
+    } catch (err: unknown) {
+      setError((err instanceof Error ? err.message : null) || 'Failed to approve authorization.')
     } finally {
       setSubmitting(false)
     }
@@ -74,7 +97,8 @@ function OAuthConsentContent() {
     setError(null)
     try {
       const supabase = createClient()
-      const result = await (supabase.auth as any).oauth.denyAuthorization(authorizationId)
+      const auth = supabase.auth as unknown as OAuthAuthClient
+      const result = await auth.oauth.denyAuthorization(authorizationId)
       if (result.error) throw result.error
       const redirectUrl = result.data?.redirect_to || result.data?.redirect_uri || result.data?.url
       if (redirectUrl) {
@@ -82,8 +106,8 @@ function OAuthConsentContent() {
       } else {
         setSuccess('Access denied.')
       }
-    } catch (err: any) {
-      setError(err?.message || 'Failed to deny authorization.')
+    } catch (err: unknown) {
+      setError((err instanceof Error ? err.message : null) || 'Failed to deny authorization.')
     } finally {
       setSubmitting(false)
     }
@@ -170,21 +194,22 @@ function OAuthConsentContent() {
         </div>
 
         <div className="flex gap-3">
-          <button
+          <Button
+            variant="outline"
             onClick={handleDeny}
             disabled={submitting}
-            className="flex-1 rounded-lg border border-input bg-background px-4 py-2.5 text-sm font-medium hover:bg-accent transition-colors cursor-pointer disabled:opacity-50"
+            className="flex-1"
           >
             Deny
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={handleApprove}
             disabled={submitting}
-            className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-foreground text-background px-4 py-2.5 text-sm font-medium hover:opacity-90 transition-opacity cursor-pointer disabled:opacity-50"
+            className="flex-1"
           >
             {submitting && <Loader2 size={14} className="animate-spin" />}
             Approve
-          </button>
+          </Button>
         </div>
 
         <p className="mt-4 text-[11px] text-center text-muted-foreground/50">

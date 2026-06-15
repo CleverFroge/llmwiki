@@ -3,6 +3,8 @@
 Tests every VaultFS method. Self-contained — no Postgres needed.
 """
 
+import uuid
+
 import pytest
 from tests.integration.mcp.conftest import TEST_USER_ID
 
@@ -75,11 +77,15 @@ class TestDocumentCRUD:
     async def test_update_document_content_and_version(self, fs):
         instance, kb_id = fs
         doc = await instance.create_document(kb_id, "notes.md", "Notes", "/", "md", "v1", ["tag"])
-        await instance.update_document(str(doc["id"]), "v2")
+        updated = await instance.update_document(str(doc["id"]), "v2")
+        assert updated == {"id": doc["id"], "filename": "notes.md", "path": "/"}
         fetched = await instance.get_document(kb_id, "notes.md", "/")
         assert fetched["content"] == "v2"
-        # Create starts at version 1; each update bumps by 1.
         assert fetched["version"] == 2
+
+    async def test_update_document_missing_returns_none(self, fs):
+        instance, _ = fs
+        assert await instance.update_document(str(uuid.uuid4()), "body") is None
 
     async def test_update_document_optional_fields(self, fs):
         instance, kb_id = fs

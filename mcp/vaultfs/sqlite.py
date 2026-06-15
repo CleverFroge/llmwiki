@@ -184,17 +184,17 @@ class SqliteVaultFS(VaultFS):
             )
 
             cursor = await db.execute(
-                "SELECT file_type FROM documents WHERE id = ?", (doc_id,),
+                "SELECT filename, path, file_type FROM documents WHERE id = ?", (doc_id,),
             )
             row = await cursor.fetchone()
-            if row and row[0] in ("md", "txt"):
+            if row and row[2] in ("md", "txt"):
                 await store_chunks_sqlite(db, doc_id, chunk_text(content or ""))
 
             await db.commit()
         except Exception:
             await db.rollback()
             raise
-        return None
+        return {"id": doc_id, "filename": row[0], "path": row[1]} if row else None
 
     async def archive_documents(self, doc_ids: list[str]) -> int:
         db = self._db_or_raise()

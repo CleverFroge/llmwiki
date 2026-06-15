@@ -69,8 +69,8 @@ class HostedUserService(UserService):
 _KB_LIST_QUERY = (
     "SELECT kb.id, kb.user_id, kb.name, kb.slug, kb.description, "
     "kb.created_at, kb.updated_at, "
-    "(SELECT COUNT(*) FROM documents d WHERE d.knowledge_base_id = kb.id AND d.path NOT LIKE '/wiki/%%' AND NOT d.archived AND COALESCE((d.metadata->>'hidden')::boolean, false) = false) AS source_count, "
-    "(SELECT COUNT(*) FROM documents d WHERE d.knowledge_base_id = kb.id AND d.path LIKE '/wiki/%%' AND NOT d.archived) AS wiki_page_count "
+    "(SELECT COUNT(*) FROM documents d WHERE d.knowledge_base_id = kb.id AND d.path NOT LIKE '/wiki/%' AND NOT d.archived AND COALESCE((d.metadata->>'hidden')::boolean, false) = false) AS source_count, "
+    "(SELECT COUNT(*) FROM documents d WHERE d.knowledge_base_id = kb.id AND d.path LIKE '/wiki/%' AND NOT d.archived) AS wiki_page_count "
     "FROM knowledge_bases kb"
 )
 
@@ -217,11 +217,11 @@ class HostedKBService(KBService):
                 visibility, public_slug, kb_id, self.user_id,
             )
         except asyncpg.UniqueViolationError as e:
-            if getattr(e, "constraint_name", "") == "idx_knowledge_bases_public_slug":
+            if e.constraint_name == "idx_knowledge_bases_public_slug":
                 raise HTTPException(status_code=409, detail="That public slug is already taken — try another.")
             raise
         except asyncpg.CheckViolationError as e:
-            if getattr(e, "constraint_name", "") == "knowledge_bases_public_slug_format":
+            if e.constraint_name == "knowledge_bases_public_slug_format":
                 raise HTTPException(status_code=400, detail="Slug must be 2–80 lowercase characters, digits, or hyphens (no leading/trailing hyphen).")
             raise
         return dict(row) if row else None
@@ -835,6 +835,13 @@ class HostedDocumentService(DocumentService):
                 anno_text, has_hl, new_content, chunk.id,
             )
 
+    @staticmethod
+    def _reraise_doc_conflict(e: asyncpg.UniqueViolationError):
+        """Map a (kb, path, filename) collision to a 409; re-raise anything else."""
+        if e.constraint_name == "idx_documents_unique_active":
+            raise HTTPException(status_code=409, detail="A document already exists at that path.")
+        raise e
+
     async def _validate_kb(self, kb_id: str) -> None:
         kb = await self.pool.fetchval(
             "SELECT id FROM knowledge_bases WHERE id = $1 AND user_id = $2",
@@ -1013,7 +1020,10 @@ class HostedDocumentService(DocumentService):
                         f"RETURNING {_DOC_COLUMNS}"
                     )
 
-                    row = await conn.fetchrow(move_sql, *move_params)
+                    try:
+                        row = await conn.fetchrow(move_sql, *move_params)
+                    except asyncpg.UniqueViolationError as e:
+                        self._reraise_doc_conflict(e)
                     if not row:
                         return None
                     # Chunks carry their own kb_id for FTS path; cascade.
@@ -1034,7 +1044,10 @@ class HostedDocumentService(DocumentService):
                 await self.pool.release(conn)
             return dict(row)
 
-        row = await self.pool.fetchrow(sql, *params)
+        try:
+            row = await self.pool.fetchrow(sql, *params)
+        except asyncpg.UniqueViolationError as e:
+            self._reraise_doc_conflict(e)
         return dict(row) if row else None
 
     async def delete(self, doc_id: str) -> bool:

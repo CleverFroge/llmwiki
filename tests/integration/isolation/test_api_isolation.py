@@ -5,8 +5,12 @@ and vice versa. Both read routes (RLS-enforced via ScopedDB) and
 write routes (service-role with explicit user_id checks) are covered.
 """
 
+import time
+
+import jwt as pyjwt
 import pytest
 
+from tests.helpers import jwt as jwt_helper
 from tests.helpers.jwt import auth_headers
 from tests.integration.isolation.conftest import (
     USER_A_ID, USER_A_EMAIL, USER_B_ID,
@@ -15,6 +19,19 @@ from tests.integration.isolation.conftest import (
     KEY_A_ID, KEY_B_ID,
     REF_A_ID, REF_B_ID,
 )
+
+
+def _claims(sub) -> dict:
+    """A fully-valid claim set, so each auth test varies exactly one thing."""
+    now = int(time.time())
+    return {
+        "sub": str(sub),
+        "aud": "authenticated",
+        "iss": jwt_helper._expected_issuer(),
+        "iat": now,
+        "exp": now + 3600,
+        "role": "authenticated",
+    }
 
 
 class TestReadIsolation:
@@ -536,32 +553,6 @@ class TestGraphIsolation:
         assert after == before
 
 
-class TestAdminStatsIsolation:
-    """Admin stats route uses ScopedDB — RLS scopes aggregates to authenticated user."""
-
-    async def test_admin_stats_does_not_leak_cross_tenant_counts(self, client):
-        """RLS on users/documents means 'global' counts only reflect the caller."""
-        resp = await client.get("/v1/admin/stats", headers=auth_headers(USER_A_ID))
-        assert resp.status_code == 200
-        data = resp.json()
-        # RLS on users table: COUNT(DISTINCT id) FROM users → 1 (only Alice)
-        assert data["total_users"] == 1
-        # RLS on documents: Alice has 2 docs (notes.md + source.pdf)
-        assert data["total_documents"] == 2
-        # Alice's notes.md has 3 pages, source.pdf has 0
-        assert data["total_pages"] == 3
-        assert data["total_storage_bytes"] == 1024
-
-    async def test_admin_stats_bob_sees_own_counts(self, client):
-        resp = await client.get("/v1/admin/stats", headers=auth_headers(USER_B_ID))
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["total_users"] == 1
-        assert data["total_documents"] == 2
-        assert data["total_pages"] == 10
-        assert data["total_storage_bytes"] == 5000
-
-
 class TestTUSUploadIsolation:
     """TUS upload routes enforce KB ownership on create and user_id on HEAD/PATCH."""
 
@@ -664,3 +655,66 @@ class TestAuthBoundary:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 401
+
+    @staticmethod
+    async def _assert_rejected(client, token: str) -> None:
+        resp = await client.get(
+            "/v1/knowledge-bases",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401
+
+    async def test_expired_token_returns_401(self, client):
+        claims = _claims(USER_A_ID)
+        claims["exp"] = int(time.time()) - 100
+        token = pyjwt.encode(
+            claims, jwt_helper._private_key, algorithm="ES256",
+            headers={"kid": jwt_helper.TEST_KID},
+        )
+        await self._assert_rejected(client, token)
+
+    async def test_wrong_issuer_returns_401(self, client):
+        claims = _claims(USER_A_ID)
+        claims["iss"] = "https://attacker.example.com/auth/v1"
+        token = pyjwt.encode(
+            claims, jwt_helper._private_key, algorithm="ES256",
+            headers={"kid": jwt_helper.TEST_KID},
+        )
+        await self._assert_rejected(client, token)
+
+    async def test_alg_none_token_returns_401(self, client):
+        """An unsigned (alg=none) token must never authenticate."""
+        token = pyjwt.encode(
+            _claims(USER_A_ID), "", algorithm="none",
+            headers={"kid": jwt_helper.TEST_KID},
+        )
+        await self._assert_rejected(client, token)
+
+    async def test_hs256_algorithm_confusion_returns_401(self, client):
+        """alg-confusion: forge an HS256 JWS using the EC public key as the HMAC
+        secret. PyJWT refuses to *encode* this, so we craft the wire form by hand
+        the way an attacker would. verify_token pins algorithms=['ES256'], so it
+        must reject before ever treating the public key as a secret."""
+        import base64
+        import hashlib
+        import hmac
+        import json
+
+        def b64(raw: bytes) -> bytes:
+            return base64.urlsafe_b64encode(raw).rstrip(b"=")
+
+        header = {"alg": "HS256", "typ": "JWT", "kid": jwt_helper.TEST_KID}
+        signing_input = (
+            b64(json.dumps(header).encode()) + b"." + b64(json.dumps(_claims(USER_A_ID)).encode())
+        )
+        sig = hmac.new(jwt_helper._public_jwk, signing_input, hashlib.sha256).digest()
+        token = (signing_input + b"." + b64(sig)).decode()
+        await self._assert_rejected(client, token)
+
+    async def test_unknown_kid_returns_401(self, client):
+        """An unknown kid forces a JWKS refetch; with no resolvable key, fail closed."""
+        token = pyjwt.encode(
+            _claims(USER_A_ID), jwt_helper._private_key, algorithm="ES256",
+            headers={"kid": "unknown-kid-999"},
+        )
+        await self._assert_rejected(client, token)

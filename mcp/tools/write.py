@@ -232,7 +232,7 @@ class WriteHandler:
         if not doc:
             return f"Document '{path}' not found."
 
-        content = doc.get("content") or doc.get("content", "") or ""
+        content = doc.get("content") or ""
         error = self._validate_single_match(content, old_text)
         if error:
             return error

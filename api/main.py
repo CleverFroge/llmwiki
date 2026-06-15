@@ -154,14 +154,23 @@ async def _local_lifespan_inner(app: FastAPI):
 @asynccontextmanager
 async def _local_lifespan(app: FastAPI):
     db = await _local_lifespan_inner(app)
+    from pathlib import Path
+    from infra.db.sqlite import create_pool as create_sqlite_pool
+    workspace = Path(app.state.workspace_path)
+    db_path = str(workspace / ".llmwiki" / "index.db")
 
-    # Start file watcher
+    # Each background writer gets its own connection so a commit can't flush
+    # another writer's (or a request handler's) open transaction.
+    reconcile_db = await create_sqlite_pool(db_path, init_schema=False)
+    watcher_db = await create_sqlite_pool(db_path, init_schema=False)
+
+    from domain.local_processor import reconcile_workspace
+    reconcile_task = asyncio.create_task(reconcile_workspace(reconcile_db, workspace))
+
     watcher_task = None
     try:
         from domain.watcher import watch_workspace
-        from pathlib import Path
-        workspace = Path(app.state.workspace_path)
-        watcher_task = asyncio.create_task(watch_workspace(db, workspace))
+        watcher_task = asyncio.create_task(watch_workspace(watcher_db, workspace))
         logger.info("File watcher started")
     except ImportError:
         logger.warning("watchfiles not installed — file watcher disabled")
@@ -169,12 +178,19 @@ async def _local_lifespan(app: FastAPI):
     try:
         yield
     finally:
+        reconcile_task.cancel()
+        try:
+            await reconcile_task
+        except asyncio.CancelledError:
+            pass
         if watcher_task:
             watcher_task.cancel()
             try:
                 await watcher_task
             except asyncio.CancelledError:
                 pass
+        await reconcile_db.close()
+        await watcher_db.close()
         await db.close()
 
 
@@ -227,13 +243,11 @@ if settings.MODE == "local":
     set_workspace_root(settings.WORKSPACE_PATH)
 else:
     from routes.api_keys import router as api_keys_router
-    from routes.admin import router as admin_router
     from routes.graph import router as graph_router
     from routes.ws import router as ws_router
     from routes.public import router as public_router
     from infra.tus import router as tus_router
     app.include_router(api_keys_router)
-    app.include_router(admin_router)
     app.include_router(tus_router)
     app.include_router(graph_router)
     app.include_router(ws_router)

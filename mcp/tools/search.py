@@ -98,6 +98,7 @@ class SearchHandler:
             self.kb_id, query, limit, path_filter,
             annotated_only=annotated_only, scope=scope,
         )
+        matches = self._apply_path_glob(matches, path)
 
         if tags:
             tag_set = {t.lower() for t in tags}
@@ -193,7 +194,7 @@ class SearchHandler:
         return "\n".join(lines)
 
     def _path_filter_key(self, path: str) -> str | None:
-        """Map a path pattern to a search filter key."""
+        """Map a path pattern to a coarse wiki/sources search filter key."""
         if path in ("*", "**", "**/*"):
             return None
         if path.startswith("/wiki"):
@@ -201,6 +202,18 @@ class SearchHandler:
         if path in ("/", "/*"):
             return "sources"
         return None
+
+    def _apply_path_glob(self, matches: list[dict], path: str) -> list[dict]:
+        """Narrow results by a file-level glob (e.g. `*.pdf`).
+
+        The coarse wiki/sources filter is pushed into SQL; finer globs the SQL
+        can't express are applied here, mirroring list/read/delete. Bare
+        directory scopes (no wildcard) are left to the coarse filter.
+        """
+        if path in ("*", "**", "**/*") or not ("*" in path or "?" in path):
+            return matches
+        glob_pat = path if path.startswith("/") else "/" + path.lstrip("/")
+        return [m for m in matches if glob_match(m["path"] + m["filename"], glob_pat)]
 
     def _format_source_line(self, doc: dict) -> str:
         """Format a single source document for list output."""

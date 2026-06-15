@@ -31,7 +31,8 @@ export default function KBPicker({ apiUrl, accessToken, value, onChange }: Props
     try {
       const list = await fetchKnowledgeBases(apiUrl, accessToken);
       setKbs(list);
-      if (!value && list.length > 0) {
+      const selectionValid = value !== null && list.some((kb) => kb.id === value);
+      if (!selectionValid && list.length > 0) {
         onChange(list[0].id);
       }
     } catch {

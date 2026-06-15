@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import asyncpg
@@ -5,23 +6,29 @@ import asyncpg
 from config import settings
 
 _pool: asyncpg.Pool | None = None
+_pool_lock = asyncio.Lock()
 
 
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(
-            settings.DATABASE_URL, min_size=1, max_size=5, command_timeout=15,
-        )
+        async with _pool_lock:
+            if _pool is None:
+                _pool = await asyncpg.create_pool(
+                    settings.DATABASE_URL, min_size=1, max_size=5, command_timeout=15,
+                )
     return _pool
 
 
 async def _set_rls(conn, user_id: str, claims: dict | None = None):
     if claims:
-        jwt_claims = {k: v for k, v in claims.items() if k in ("sub", "aud", "role", "client_id", "scope")}
+        jwt_claims = {k: v for k, v in claims.items() if k in ("sub", "aud", "client_id", "scope")}
         jwt_claims.setdefault("sub", user_id)
     else:
         jwt_claims = {"sub": user_id}
+    # Pin the role rather than trusting the token claim — these connections are
+    # always user-scoped, and auth.role() drives RLS policy evaluation.
+    jwt_claims["role"] = "authenticated"
     await conn.execute("SET LOCAL ROLE authenticated")
     await conn.execute("SELECT set_config('request.jwt.claims', $1, true)", json.dumps(jwt_claims))
 

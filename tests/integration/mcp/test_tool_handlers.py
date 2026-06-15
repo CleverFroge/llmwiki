@@ -670,6 +670,23 @@ class TestSearchDeleteLifecycle:
         result = await searcher.search_chunks("quantum", "*", None, 10)
         assert "quantum" in result.lower()
 
+    async def test_search_chunks_respects_file_glob(self, fs, insert_chunk):
+        instance, kb_id = fs
+        from tools.search import SearchHandler
+
+        searcher = SearchHandler(instance, _make_kb(kb_id))
+
+        await instance.create_document(kb_id, "paper.pdf", "Paper", "/", "pdf", "", ["science"])
+        await instance.create_document(kb_id, "notes.md", "Notes", "/", "md", "", ["science"])
+        pdf = await instance.get_document(kb_id, "paper.pdf", "/")
+        md = await instance.get_document(kb_id, "notes.md", "/")
+        await insert_chunk(str(pdf["id"]), kb_id, "quantum entanglement in the paper")
+        await insert_chunk(str(md["id"]), kb_id, "quantum notes here")
+
+        result = await searcher.search_chunks("quantum", "*.pdf", None, 10)
+        assert "paper.pdf" in result
+        assert "notes.md" not in result
+
     async def test_search_references_uncited(self, fs):
         instance, kb_id = fs
         from tools.search import SearchHandler

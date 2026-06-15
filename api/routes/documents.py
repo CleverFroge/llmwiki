@@ -131,11 +131,6 @@ async def upsert_document_highlight(
             status_code=409,
             detail="Version mismatch — refetch and retry",
         )
-    if row.get("limit_exceeded"):
-        raise HTTPException(
-            status_code=413,
-            detail="Highlight limit reached (500 per document)",
-        )
     return row
 
 

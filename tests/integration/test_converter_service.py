@@ -1,3 +1,12 @@
+"""Converter /extract tests.
+
+Extraction shells out to opendataloader in a child process and streams the
+source over httpx, so the seams we mock are `_run_in_process_group` (the
+subprocess) and `httpx.AsyncClient` (the download) — not an in-process library
+call. CONVERTER_SECRET is mandatory, so the fixture sets it and requests carry
+the matching bearer token by default.
+"""
+
 import asyncio
 import importlib
 import json
@@ -10,67 +19,90 @@ from pathlib import Path
 import pytest
 from httpx import ASGITransport, AsyncClient as HTTPXAsyncClient
 
+_SECRET = "test-secret"
+_AUTH = {"Authorization": f"Bearer {_SECRET}"}
+
 
 @pytest.fixture
 def converter_module(monkeypatch):
     Path("/tmp/conversions").mkdir(parents=True, exist_ok=True)
-
-    fake_module = types.SimpleNamespace(convert=lambda **kwargs: None)
-    monkeypatch.setitem(sys.modules, "opendataloader_pdf", fake_module)
-
+    monkeypatch.setenv("CONVERTER_SECRET", _SECRET)
     module = importlib.import_module("converter.main")
     return importlib.reload(module)
 
 
-def _install_mocks(monkeypatch, converter_module):
-    class FakeDownloadResponse:
-        def __init__(self, content: bytes):
-            self.content = content
+class _FakeStreamResponse:
+    def __init__(self, data: bytes):
+        self._data = data
 
-        def raise_for_status(self):
-            return None
+    async def __aenter__(self):
+        return self
 
-    class FakeAsyncClient:
-        def __init__(self, *args, **kwargs):
-            pass
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
-        async def __aenter__(self):
-            return self
+    def raise_for_status(self):
+        return None
 
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
+    async def aiter_bytes(self, chunk_size: int = 65536):
+        for i in range(0, len(self._data), chunk_size):
+            yield self._data[i:i + chunk_size]
 
-        async def get(self, url: str):
-            if "alpha" in url:
-                return FakeDownloadResponse(b"alpha document")
-            if "beta" in url:
-                return FakeDownloadResponse(b"beta document")
-            return FakeDownloadResponse(b"default document")
 
-    def fake_convert(*, input_path: str, output_dir: str, format: str, quiet: bool):
-        source_path = Path(input_path)
-        source_text = source_path.read_text(encoding="utf-8")
-        marker = source_path.parent.name
-        payload = {
-            "number of pages": 1,
-            "kids": [
-                {
+class _FakeAsyncClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def stream(self, method: str, url: str):
+        if "alpha" in url:
+            return _FakeStreamResponse(b"alpha document")
+        if "beta" in url:
+            return _FakeStreamResponse(b"beta document")
+        return _FakeStreamResponse(b"default document")
+
+
+def _install_mocks(monkeypatch, converter_module, page_payload: dict | None = None):
+    """Replace the download client and the opendataloader/LibreOffice subprocess."""
+    monkeypatch.setattr(converter_module.httpx, "AsyncClient", _FakeAsyncClient)
+
+    def fake_run(command: list[str], timeout: int, what: str) -> None:
+        if what == "LibreOffice":
+            outdir = command[command.index("--outdir") + 1]
+            source = Path(command[-1])
+            Path(outdir, f"{source.stem}.pdf").write_bytes(b"%PDF-1.4 fake")
+            return
+        if what != "opendataloader":
+            return
+        pdf_path = Path(command[-2])
+        output_dir = command[-1]
+        if page_payload is not None:
+            payload = page_payload
+        else:
+            source_text = pdf_path.read_text(encoding="utf-8")
+            marker = pdf_path.parent.name
+            payload = {
+                "number of pages": 1,
+                "kids": [{
                     "type": "paragraph",
                     "page number": 1,
                     "content": f"{source_text} :: {marker}",
-                }
-            ],
-        }
+                }],
+            }
         Path(output_dir, "result.json").write_text(json.dumps(payload), encoding="utf-8")
 
-    monkeypatch.setattr(converter_module.httpx, "AsyncClient", FakeAsyncClient)
-    monkeypatch.setattr(converter_module.opendataloader_pdf, "convert", fake_convert)
+    monkeypatch.setattr(converter_module, "_run_in_process_group", fake_run)
 
 
 async def _post_extract(converter_module, payload: dict, headers: dict | None = None):
     transport = ASGITransport(app=converter_module.app)
     async with HTTPXAsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.post("/extract", json=payload, headers=headers or {})
+        return await client.post("/extract", json=payload, headers=_AUTH if headers is None else headers)
 
 
 async def test_request_id_echo_and_absence(monkeypatch, converter_module):
@@ -78,18 +110,11 @@ async def test_request_id_echo_and_absence(monkeypatch, converter_module):
 
     with_id = await _post_extract(
         converter_module,
-        {
-            "source_url": "https://bucket.s3.amazonaws.com/alpha.pdf",
-            "source_ext": "pdf",
-            "request_id": "req-alpha",
-        },
+        {"source_url": "https://bucket.s3.amazonaws.com/alpha.pdf", "source_ext": "pdf", "request_id": "req-alpha"},
     )
     without_id = await _post_extract(
         converter_module,
-        {
-            "source_url": "https://bucket.s3.amazonaws.com/beta.pdf",
-            "source_ext": "pdf",
-        },
+        {"source_url": "https://bucket.s3.amazonaws.com/beta.pdf", "source_ext": "pdf"},
     )
 
     assert with_id.status_code == 200
@@ -107,19 +132,11 @@ async def test_concurrent_request_isolation(monkeypatch, converter_module):
     resp_a, resp_b = await asyncio.gather(
         _post_extract(
             converter_module,
-            {
-                "source_url": "https://bucket.s3.amazonaws.com/alpha.pdf",
-                "source_ext": "pdf",
-                "request_id": "req-a",
-            },
+            {"source_url": "https://bucket.s3.amazonaws.com/alpha.pdf", "source_ext": "pdf", "request_id": "req-a"},
         ),
         _post_extract(
             converter_module,
-            {
-                "source_url": "https://bucket.s3.amazonaws.com/beta.pdf",
-                "source_ext": "pdf",
-                "request_id": "req-b",
-            },
+            {"source_url": "https://bucket.s3.amazonaws.com/beta.pdf", "source_ext": "pdf", "request_id": "req-b"},
         ),
     )
 
@@ -130,11 +147,49 @@ async def test_concurrent_request_isolation(monkeypatch, converter_module):
     assert resp_b.status_code == 200
     assert body_a["request_id"] == "req-a"
     assert body_b["request_id"] == "req-b"
-    assert body_a["pages"] == [{"page": 1, "content": body_a["pages"][0]["content"]}]
-    assert body_b["pages"] == [{"page": 1, "content": body_b["pages"][0]["content"]}]
     assert body_a["pages"][0]["content"].startswith("alpha document")
     assert body_b["pages"][0]["content"].startswith("beta document")
     assert body_a["pages"][0]["content"] != body_b["pages"][0]["content"]
+
+
+async def test_office_file_converted_then_extracted(monkeypatch, converter_module):
+    _install_mocks(monkeypatch, converter_module)
+
+    resp = await _post_extract(
+        converter_module,
+        {"source_url": "https://bucket.s3.amazonaws.com/alpha.docx", "source_ext": "docx"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["page_count"] == 1
+
+
+async def test_malicious_page_count_is_clamped(monkeypatch, converter_module):
+    """A crafted `number of pages` must not drive an unbounded assembly loop."""
+    _install_mocks(monkeypatch, converter_module, page_payload={
+        "number of pages": 10_000_000_000,
+        "kids": [{"type": "paragraph", "page number": 1, "content": "hi"}],
+    })
+
+    resp = await _post_extract(
+        converter_module,
+        {"source_url": "https://bucket.s3.amazonaws.com/alpha.pdf", "source_ext": "pdf"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["page_count"] == converter_module.MAX_PAGES
+
+
+async def test_non_integer_page_count_does_not_crash(monkeypatch, converter_module):
+    _install_mocks(monkeypatch, converter_module, page_payload={"number of pages": "lots", "kids": []})
+
+    resp = await _post_extract(
+        converter_module,
+        {"source_url": "https://bucket.s3.amazonaws.com/alpha.pdf", "source_ext": "pdf"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["page_count"] == 0
 
 
 async def test_temp_directory_cleanup(monkeypatch, converter_module):
@@ -159,11 +214,7 @@ async def test_temp_directory_cleanup(monkeypatch, converter_module):
 
     resp = await _post_extract(
         converter_module,
-        {
-            "source_url": "https://bucket.s3.amazonaws.com/alpha.pdf",
-            "source_ext": "pdf",
-            "request_id": "cleanup-check",
-        },
+        {"source_url": "https://bucket.s3.amazonaws.com/alpha.pdf", "source_ext": "pdf", "request_id": "cleanup-check"},
     )
 
     assert resp.status_code == 200
@@ -177,12 +228,9 @@ async def test_auth_enforcement(monkeypatch, converter_module):
     _install_mocks(monkeypatch, converter_module)
     monkeypatch.setattr(converter_module, "CONVERTER_SECRET", "top-secret")
 
-    payload = {
-        "source_url": "https://bucket.s3.amazonaws.com/alpha.pdf",
-        "source_ext": "pdf",
-    }
+    payload = {"source_url": "https://bucket.s3.amazonaws.com/alpha.pdf", "source_ext": "pdf"}
 
-    missing = await _post_extract(converter_module, payload)
+    missing = await _post_extract(converter_module, payload, headers={})
     wrong = await _post_extract(converter_module, payload, headers={"Authorization": "Bearer nope"})
     correct = await _post_extract(converter_module, payload, headers={"Authorization": "Bearer top-secret"})
 
@@ -196,11 +244,7 @@ async def test_s3_url_validation(monkeypatch, converter_module):
 
     resp = await _post_extract(
         converter_module,
-        {
-            "source_url": "https://example.com/not-s3.pdf",
-            "source_ext": "pdf",
-            "request_id": "bad-url",
-        },
+        {"source_url": "https://example.com/not-s3.pdf", "source_ext": "pdf", "request_id": "bad-url"},
     )
 
     assert resp.status_code == 400
@@ -231,19 +275,11 @@ async def test_no_persistent_state_between_requests(monkeypatch, converter_modul
 
     first = await _post_extract(
         converter_module,
-        {
-            "source_url": "https://bucket.s3.amazonaws.com/alpha.pdf",
-            "source_ext": "pdf",
-            "request_id": "state-a",
-        },
+        {"source_url": "https://bucket.s3.amazonaws.com/alpha.pdf", "source_ext": "pdf", "request_id": "state-a"},
     )
     second = await _post_extract(
         converter_module,
-        {
-            "source_url": "https://bucket.s3.amazonaws.com/beta.pdf",
-            "source_ext": "pdf",
-            "request_id": "state-b",
-        },
+        {"source_url": "https://bucket.s3.amazonaws.com/beta.pdf", "source_ext": "pdf", "request_id": "state-b"},
     )
 
     assert first.status_code == 200

@@ -1,16 +1,19 @@
 """MCP PostgresVaultFS multi-tenant isolation tests.
 
-Verifies that PostgresVaultFS operations for User A cannot access User B's
-data, and vice versa. Tests both read and write isolation at the VaultFS layer.
+Verifies that PostgresVaultFS operations for User A cannot reach User B's data,
+and vice versa, across reads, writes, graph queries, and S3 key derivation.
+
+search_chunks is excluded: it needs PGroonga's `&@~` operator, which the test
+Postgres lacks. Its tenancy guards (`d.user_id = $3` plus RLS on
+document_chunks) are the same ones every other query here exercises.
 """
 
 import os
-import json
+import uuid
 
 import asyncpg
 import pytest
 
-# MCP path already added by tests/integration/mcp/conftest.py
 from vaultfs.postgres import PostgresVaultFS
 import db as mcp_db
 
@@ -55,10 +58,8 @@ async def pg_pool():
 @pytest.fixture(autouse=True)
 async def seed_and_bind_pool(pg_pool):
     """Seed two tenants and point mcp.db's global pool at the test pool."""
-    # Point mcp/db.py's global _pool at our test pool
     mcp_db._pool = pg_pool
 
-    # Clean + seed (mirrors isolation/conftest.py)
     await pg_pool.execute("DELETE FROM document_references")
     await pg_pool.execute("DELETE FROM document_chunks")
     await pg_pool.execute("DELETE FROM document_pages")
@@ -132,8 +133,6 @@ async def seed_and_bind_pool(pg_pool):
         REF_B_ID, DOC_B_ID, DOC_B2_ID, KB_B_ID,
     )
 
-    # Document pages for get_pages / get_all_pages tests
-    import uuid
     await pg_pool.execute(
         "INSERT INTO document_pages (id, document_id, page, content) VALUES ($1, $2, 1, 'Alice page 1')",
         str(uuid.uuid4()), DOC_A_ID,
@@ -143,20 +142,6 @@ async def seed_and_bind_pool(pg_pool):
         str(uuid.uuid4()), DOC_B_ID,
     )
 
-    # Document chunks for search_chunks tests (note: PGroonga not available in test, but isolation still testable)
-    long_content = "x " * 70
-    await pg_pool.execute(
-        "INSERT INTO document_chunks (id, document_id, user_id, knowledge_base_id, chunk_index, content, token_count) "
-        "VALUES ($1, $2, $3, $4, 0, $5, 35)",
-        str(uuid.uuid4()), DOC_A_ID, USER_A_ID, KB_A_ID, long_content,
-    )
-    await pg_pool.execute(
-        "INSERT INTO document_chunks (id, document_id, user_id, knowledge_base_id, chunk_index, content, token_count) "
-        "VALUES ($1, $2, $3, $4, 0, $5, 35)",
-        str(uuid.uuid4()), DOC_B_ID, USER_B_ID, KB_B_ID, long_content,
-    )
-
-    # Set stale_since on Bob's wiki doc for find_stale_pages test
     await pg_pool.execute(
         "UPDATE documents SET stale_since = now() WHERE id = $1", DOC_B_ID,
     )
@@ -238,6 +223,21 @@ class TestReadIsolation:
         assert data == b"asset-bytes"
         assert calls == [f"{USER_A_ID}/{ASSET_A_ID}/source.png"]
 
+    async def test_load_image_bytes_uses_own_prefix(self, fs_alice, monkeypatch):
+        """Image S3 keys are always prefixed with the caller's user_id, so a
+        foreign document_id can never resolve to another tenant's object."""
+        calls: list[str] = []
+
+        async def fake_load_s3(self, key):
+            calls.append(key)
+            return b"img"
+
+        monkeypatch.setattr(PostgresVaultFS, "_load_s3", fake_load_s3)
+
+        await fs_alice.load_image_bytes(str(DOC_B_ID), "fig-1.png")
+
+        assert calls == [f"{USER_A_ID}/{DOC_B_ID}/images/fig-1.png"]
+
 
 class TestWriteIsolation:
     """PostgresVaultFS writes include WHERE user_id = $N (service-role)."""
@@ -245,14 +245,40 @@ class TestWriteIsolation:
     async def test_archive_documents_other_tenant_returns_zero(self, fs_alice, pg_pool):
         count = await fs_alice.archive_documents([str(DOC_B_ID)])
         assert count == 0
-        # Verify Bob's doc is not archived
         row = await pg_pool.fetchrow("SELECT archived FROM documents WHERE id = $1", DOC_B_ID)
         assert row["archived"] is False
 
+    async def test_archive_mixed_batch_archives_only_own(self, fs_alice, pg_pool):
+        """A batch mixing Alice's and Bob's ids archives only Alice's."""
+        count = await fs_alice.archive_documents([str(DOC_A2_ID), str(DOC_B2_ID)])
+        assert count == 1
+        rows = await pg_pool.fetch(
+            "SELECT id, archived FROM documents WHERE id = ANY($1::uuid[])",
+            [DOC_A2_ID, DOC_B2_ID],
+        )
+        archived = {str(r["id"]): r["archived"] for r in rows}
+        assert archived[DOC_A2_ID] is True
+        assert archived[DOC_B2_ID] is False
+
     async def test_update_document_other_tenant_does_not_modify(self, fs_alice, pg_pool):
-        await fs_alice.update_document(str(DOC_B_ID), "pwned by alice")
+        result = await fs_alice.update_document(str(DOC_B_ID), "pwned by alice")
+        assert result is None
         row = await pg_pool.fetchrow("SELECT content FROM documents WHERE id = $1", DOC_B_ID)
         assert row["content"] == "Bob secret"
+
+    async def test_create_document_into_other_tenant_kb_rejected(self, fs_alice, pg_pool):
+        """create_document writes into the caller's own KB but refuses a foreign one."""
+        own = await fs_alice.create_document(
+            str(KB_A_ID), "mine.md", "Mine", "/wiki/", "md", "x", ["t"],
+        )
+        assert own["filename"] == "mine.md"
+
+        with pytest.raises(PermissionError):
+            await fs_alice.create_document(
+                str(KB_B_ID), "sneak.md", "Sneak", "/wiki/", "md", "x", ["t"],
+            )
+        rows = await pg_pool.fetch("SELECT id FROM documents WHERE filename = 'sneak.md'")
+        assert rows == []
 
 
 class TestReferenceIsolation:
@@ -260,24 +286,22 @@ class TestReferenceIsolation:
 
     async def test_delete_references_other_tenant_deletes_nothing(self, fs_alice, pg_pool):
         await fs_alice.delete_references(str(DOC_B_ID))
-        # Bob's reference should still exist
         row = await pg_pool.fetchrow(
             "SELECT id FROM document_references WHERE id = $1", REF_B_ID,
         )
         assert row is not None
 
     async def test_upsert_reference_cross_tenant_kb_fails(self, fs_alice, pg_pool):
-        """Inserting a reference into Bob's KB should fail silently (exception caught)."""
+        """An edge written into Bob's KB is rejected by RLS and caught, leaving
+        Bob's KB with only his own pre-existing reference."""
         await fs_alice.upsert_reference(
             str(DOC_A_ID), str(DOC_A2_ID), str(KB_B_ID), "cites", None,
         )
-        # No new reference should exist in Bob's KB from Alice
         rows = await pg_pool.fetch(
             "SELECT id FROM document_references WHERE knowledge_base_id = $1",
             KB_B_ID,
         )
-        ids = [str(r["id"]) for r in rows]
-        assert ids == [REF_B_ID]  # Only Bob's original reference
+        assert [str(r["id"]) for r in rows] == [REF_B_ID]
 
     async def test_delete_own_references_works(self, fs_alice, pg_pool):
         await fs_alice.delete_references(str(DOC_A_ID))
@@ -325,12 +349,12 @@ class TestGraphQueryIsolation:
     """Backlinks, forward references, uncited sources, stale pages."""
 
     async def test_get_backlinks_other_tenant_doc_returns_empty(self, fs_alice):
-        # DOC_B2_ID is the target of Bob's reference — Alice shouldn't see it
+        """DOC_B2 is the target of Bob's citation; Alice sees no backlinks to it."""
         links = await fs_alice.get_backlinks(str(DOC_B2_ID))
         assert links == []
 
     async def test_get_backlinks_own_doc_returns_data(self, fs_alice):
-        # DOC_A2_ID is the target of Alice's reference (DOC_A -> DOC_A2)
+        """DOC_A2 is the target of Alice's citation (DOC_A cites DOC_A2)."""
         links = await fs_alice.get_backlinks(str(DOC_A2_ID))
         assert len(links) == 1
         assert links[0]["filename"] == "notes.md"

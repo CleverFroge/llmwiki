@@ -34,7 +34,10 @@ def parse_page_range(pages_str: str, max_page: int) -> list[int]:
         part = part.strip()
         if "-" in part:
             start, end = part.split("-", 1)
-            s, e = int(start.strip()), int(end.strip())
+            start, end = start.strip(), end.strip()
+            if not start.isdigit() or not end.isdigit():
+                continue
+            s, e = int(start), int(end)
             for p in range(max(1, s), min(max_page, e) + 1):
                 result.add(p)
         elif part.isdigit():

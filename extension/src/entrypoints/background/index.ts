@@ -1,5 +1,5 @@
 import { getSupabase } from "@/lib/supabase";
-import { getApiUrl } from "@/lib/settings";
+import { getApiUrl, clearAccountSelections } from "@/lib/settings";
 import { isAllowedApiFetchUrl, isSupportedRemoteResourceUrl } from "@/lib/security";
 import type { AuthChangeEvent, Session } from "@supabase/auth-js";
 
@@ -31,8 +31,16 @@ export default defineBackground(() => {
   supabase.auth.onAuthStateChange((_event: AuthChangeEvent, _session: Session | null) => {});
 
   chrome.runtime.onMessage.addListener(
-    (message: Message, _sender, sendResponse) => {
-      handleMessage(message).then(sendResponse);
+    (message: Message, sender, sendResponse) => {
+      // Only our own contexts (popup, injected content scripts) may drive these
+      // privileged handlers. Without externally_connectable no web page can
+      // reach here, but reject foreign senders as defense in depth.
+      if (sender.id !== chrome.runtime.id) return false;
+      handleMessage(message)
+        .then(sendResponse)
+        .catch((err: unknown) => {
+          sendResponse({ error: err instanceof Error ? err.message : "Background error" });
+        });
       return true; // will respond asynchronously
     },
   );
@@ -206,6 +214,7 @@ export default defineBackground(() => {
 
   async function signOut() {
     await supabase.auth.signOut();
+    await clearAccountSelections();
     return { success: true };
   }
 
@@ -266,8 +275,11 @@ export default defineBackground(() => {
       if (!isSupportedRemoteResourceUrl(url)) {
         return { error: "Unsupported image URL" };
       }
+      // No credentials: capture the public bytes of cross-origin images, never
+      // the viewer's authenticated version (which would archive private images
+      // into the wiki). The API falls back to its own credential-less fetch.
       const response = await fetch(url, {
-        credentials: "include",
+        credentials: "omit",
         cache: "force-cache",
       });
       if (!response.ok) {

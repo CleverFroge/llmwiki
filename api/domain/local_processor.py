@@ -16,24 +16,35 @@ from pathlib import Path
 import aiosqlite
 
 from config import settings
+from domain.file_types import (
+    EXTRACTION_TYPES, HTML_TYPES, IMAGE_TYPES, OFFICE_TYPES,
+    PDF_TYPES, SIMPLE_TEXT_TYPES, SPREADSHEET_TYPES,
+)
 from domain.watcher import mark_written
-from infra.db.sqlite import SQLiteDocumentRepository
+from infra.db.sqlite import SQLiteDocumentRepository, create_pool
 from services.extracted_assets import build_pdf_image_assets
 
 logger = logging.getLogger(__name__)
 
-PDF_TYPES = frozenset({"pdf"})
-SPREADSHEET_TYPES = frozenset({"xlsx", "xls"})
-IMAGE_TYPES = frozenset({"png", "jpg", "jpeg", "webp", "gif"})
-OFFICE_TYPES = frozenset({"pptx", "ppt", "docx", "doc"})
-
-from services.pdf_extract import extract_pdf
+# Cap concurrent fire-and-forget extractions so a burst of dropped files can't
+# spawn one LibreOffice/OCR job (and connection) per file at once.
+PROCESS_CONCURRENCY = 4
+_process_semaphore = asyncio.Semaphore(PROCESS_CONCURRENCY)
 
 
 async def process_document(db: aiosqlite.Connection, doc_id: str, workspace: Path) -> None:
-    """Process a pending document: extract text, chunk, update index."""
+    """Atomically claim a pending document, then extract text, chunk, update index."""
+    claim = await db.execute(
+        "UPDATE documents SET status = 'processing', error_message = NULL, "
+        "updated_at = datetime('now') WHERE id = ? AND status = 'pending'",
+        (doc_id,),
+    )
+    await db.commit()
+    if claim.rowcount == 0:
+        return
+
     cursor = await db.execute(
-        "SELECT id, filename, file_type, relative_path, status FROM documents WHERE id = ?",
+        "SELECT filename, file_type, relative_path FROM documents WHERE id = ?",
         (doc_id,),
     )
     row = await cursor.fetchone()
@@ -43,9 +54,6 @@ async def process_document(db: aiosqlite.Connection, doc_id: str, workspace: Pat
 
     cols = [d[0] for d in cursor.description]
     doc = dict(zip(cols, row))
-
-    if doc["status"] not in ("pending", "processing"):
-        return
 
     file_type = doc["file_type"] or ""
     file_path = workspace / doc["relative_path"]
@@ -59,12 +67,6 @@ async def process_document(db: aiosqlite.Connection, doc_id: str, workspace: Pat
         await db.commit()
         return
 
-    await db.execute(
-        "UPDATE documents SET status = 'processing', updated_at = datetime('now') WHERE id = ?",
-        (doc_id,),
-    )
-    await db.commit()
-
     try:
         if file_type in PDF_TYPES:
             await _process_pdf(db, doc_id, file_path, workspace)
@@ -74,7 +76,7 @@ async def process_document(db: aiosqlite.Connection, doc_id: str, workspace: Pat
             await _process_spreadsheet(db, doc_id, file_path)
         elif file_type in IMAGE_TYPES:
             await _process_image(db, doc_id)
-        elif file_type in ("html", "htm"):
+        elif file_type in HTML_TYPES:
             await _process_html(db, doc_id, file_path)
         else:
             await db.execute(
@@ -94,6 +96,64 @@ async def process_document(db: aiosqlite.Connection, doc_id: str, workspace: Pat
         )
         await db.commit()
         logger.error("Failed to process %s: %s", doc["filename"], e)
+
+
+async def process_document_isolated(workspace: Path, doc_id: str) -> None:
+    """Process a document on its own connection so fire-and-forget tasks can't
+    flush another writer's open transaction on a shared connection."""
+    async with _process_semaphore:
+        db = await create_pool(str(workspace / ".llmwiki" / "index.db"), init_schema=False)
+        try:
+            await process_document(db, doc_id, workspace)
+        finally:
+            await db.close()
+
+
+async def chunk_text_document(db: aiosqlite.Connection, doc_id: str, content: str | None) -> None:
+    """Chunk an already-extracted text document so it becomes full-text searchable."""
+    from services.chunker import chunk_text
+
+    await _store_chunks(db, doc_id, chunk_text(content or ""))
+    # `parser` doubles as the chunked-marker so reconcile skips docs that
+    # legitimately produce zero chunks (empty/short) instead of retrying them.
+    await db.execute(
+        "UPDATE documents SET parser = 'text', updated_at = datetime('now') WHERE id = ?",
+        (doc_id,),
+    )
+    await db.commit()
+
+
+async def reconcile_workspace(db: aiosqlite.Connection, workspace: Path) -> None:
+    """Process documents that were indexed but never extracted or chunked.
+
+    `llmwiki init` lists existing files into the index without extracting PDFs
+    or building search chunks; this backfills both so a folder pointed at on
+    first run is actually readable and searchable.
+    """
+    extract_ids = await _unchunked_extractable_ids(db)
+    for doc_id in extract_ids:
+        try:
+            await db.execute(
+                "UPDATE documents SET status = 'pending', updated_at = datetime('now') WHERE id = ?",
+                (doc_id,),
+            )
+            await db.commit()
+            await process_document(db, doc_id, workspace)
+        except Exception:
+            logger.exception("Reconcile: failed to process %s", doc_id[:8])
+
+    text_docs = await _unchunked_text_docs(db)
+    for doc_id, content in text_docs:
+        try:
+            await chunk_text_document(db, doc_id, content)
+        except Exception:
+            logger.exception("Reconcile: failed to chunk %s", doc_id[:8])
+
+    if extract_ids or text_docs:
+        logger.info(
+            "Reconciled workspace: %d extracted, %d text-chunked",
+            len(extract_ids), len(text_docs),
+        )
 
 
 async def _store_chunks(db: aiosqlite.Connection, doc_id: str, chunks: list) -> None:
@@ -194,6 +254,7 @@ async def _process_pdf(db: aiosqlite.Connection, doc_id: str, file_path: Path, w
     if settings.PDF_BACKEND == "mistral" and settings.MISTRAL_API_KEY:
         await _process_pdf_mistral(db, doc_id, file_path, workspace)
     else:
+        from services.pdf_extract import extract_pdf
         pages_with_images = await asyncio.to_thread(extract_pdf, str(file_path))
         page_elements = await _save_local_images(db, doc_id, workspace, pages_with_images)
         page_contents = [(num, md) for num, md, _ in pages_with_images]
@@ -235,6 +296,7 @@ async def _process_office(db: aiosqlite.Connection, doc_id: str, file_path: Path
         cache_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(converted_pdf, cache_dir / "converted.pdf")
 
+        from services.pdf_extract import extract_pdf
         pages_with_images = await asyncio.to_thread(extract_pdf, str(converted_pdf))
         page_elements = await _save_local_images(db, doc_id, workspace, pages_with_images)
         page_contents = [(num, md) for num, md, _ in pages_with_images]
@@ -346,3 +408,35 @@ async def _process_html(db: aiosqlite.Connection, doc_id: str, file_path: Path) 
         (content, doc_id),
     )
     await db.commit()
+
+
+# ── Reconciliation queries ────────────────────────────────────────────────
+
+async def _unchunked_extractable_ids(db: aiosqlite.Connection) -> list[str]:
+    """IDs of never-processed extractable docs (PDF/Office/spreadsheet/HTML) with no chunks.
+
+    Excludes 'processing' so reconcile never reclaims a doc an isolated task is mid-extracting.
+    """
+    placeholders = ",".join("?" for _ in EXTRACTION_TYPES)
+    cursor = await db.execute(
+        f"SELECT id FROM documents WHERE status NOT IN ('failed', 'processing') AND source_kind != 'asset' "
+        f"AND parser IS NULL "
+        f"AND file_type IN ({placeholders}) "
+        f"AND id NOT IN (SELECT DISTINCT document_id FROM document_chunks)",
+        tuple(EXTRACTION_TYPES),
+    )
+    return [r[0] for r in await cursor.fetchall()]
+
+
+async def _unchunked_text_docs(db: aiosqlite.Connection) -> list[tuple[str, str]]:
+    """(id, content) for never-chunked simple-text docs that have content."""
+    placeholders = ",".join("?" for _ in SIMPLE_TEXT_TYPES)
+    cursor = await db.execute(
+        f"SELECT id, content FROM documents WHERE status NOT IN ('failed', 'processing') AND source_kind != 'asset' "
+        f"AND parser IS NULL "
+        f"AND file_type IN ({placeholders}) "
+        f"AND content IS NOT NULL AND content != '' "
+        f"AND id NOT IN (SELECT DISTINCT document_id FROM document_chunks)",
+        tuple(SIMPLE_TEXT_TYPES),
+    )
+    return [(r[0], r[1]) for r in await cursor.fetchall()]
