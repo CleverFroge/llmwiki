@@ -11,6 +11,8 @@ const isLocal = process.env.NEXT_PUBLIC_MODE === 'local'
 const POLL_INTERVAL = 2000
 const WS_RECONNECT_BASE = 1000
 const WS_RECONNECT_MAX = 30000
+const WS_CLOSE_AUTH = 4001
+const WS_CLOSE_FORBIDDEN = 4003
 const DEBOUNCE_MS = 300
 
 // Fields whose change we want to *force* a re-render through identity churn.
@@ -131,11 +133,15 @@ export function useKBDocuments(knowledgeBaseId: string) {
         // 4001 = auth failure. The common cause is a tab reconnecting with a
         // token that expired while the page was open; ask Supabase to refresh
         // and let the accessToken dependency recreate the socket.
-        if (e.code === 4001) {
+        if (e.code === WS_CLOSE_AUTH) {
           console.warn('WebSocket auth failed; refreshing token:', e.reason)
           refreshAccessToken().catch((err) => {
             console.error('Token refresh after WebSocket auth failure failed:', err)
           })
+          return
+        }
+        if (e.code === WS_CLOSE_FORBIDDEN) {
+          console.warn('WebSocket subscription forbidden; stopping reconnect:', e.reason)
           return
         }
         // Reconnect with exponential backoff

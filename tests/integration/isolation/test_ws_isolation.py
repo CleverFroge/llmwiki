@@ -6,14 +6,16 @@ The broadcast key is (user_id, kb_id) — both must match for delivery.
 
 import asyncio
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from unittest.mock import AsyncMock, patch
 
 from tests.helpers.jwt import make_token, seed_jwks_cache
 from tests.integration.isolation.conftest import (
-    USER_A_ID, USER_B_ID,
-    KB_A_ID, KB_B_ID,
+    KB_A_ID,
+    KB_B_ID,
+    USER_A_ID,
+    USER_B_ID,
 )
 
 
@@ -135,22 +137,33 @@ class TestWebSocketAuth:
     """Integration tests for WebSocket authentication flow."""
 
     @pytest.fixture
-    def ws_client(self, pool):
-        from starlette.testclient import TestClient
+    def ws_client(self):
         from main import app
-        from services.hosted import HostedServiceFactory
+        from routes.ws import manager
+        from starlette.testclient import TestClient
 
-        app.state.pool = pool
+        class FakePool:
+            async def fetchval(self, query, kb_id, user_id):
+                if kb_id == str(KB_A_ID) and user_id == USER_A_ID:
+                    return 1
+                if kb_id == str(KB_B_ID) and user_id == USER_B_ID:
+                    return 1
+                return None
+
+        manager._connections.clear()
+        app.state.pool = FakePool()
         app.state.s3_service = None
         app.state.ocr_service = None
         app.state.auth_provider = None
-        app.state.factory = HostedServiceFactory(pool)
+        app.state.factory = None
         seed_jwks_cache()
-        return TestClient(app)
+        try:
+            yield TestClient(app)
+        finally:
+            manager._connections.clear()
 
     def test_valid_token_connects_and_stays_open(self, ws_client):
         """Valid token should authenticate and keep the connection open."""
-        from starlette.websockets import WebSocketDisconnect
         token = make_token(USER_A_ID)
         with ws_client.websocket_connect(f"/v1/ws/documents/{KB_A_ID}") as ws:
             ws.send_text(token)
@@ -177,6 +190,26 @@ class TestWebSocketAuth:
             with pytest.raises(WebSocketDisconnect) as exc_info:
                 ws.receive_text()
             assert exc_info.value.code == 4001
+
+    def test_foreign_kb_rejected_with_4003(self, ws_client):
+        """A valid user cannot register a socket against another user's KB."""
+        from starlette.websockets import WebSocketDisconnect
+        token = make_token(USER_A_ID)
+        with ws_client.websocket_connect(f"/v1/ws/documents/{KB_B_ID}") as ws:
+            ws.send_text(token)
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                ws.receive_text()
+            assert exc_info.value.code == 4003
+
+    def test_malformed_kb_id_rejected_with_4003(self, ws_client):
+        """Malformed KB ids are rejected before the socket is registered."""
+        from starlette.websockets import WebSocketDisconnect
+        token = make_token(USER_A_ID)
+        with ws_client.websocket_connect("/v1/ws/documents/not-a-uuid") as ws:
+            ws.send_text(token)
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                ws.receive_text()
+            assert exc_info.value.code == 4003
 
 
 class TestNotifyTriggerPayload:

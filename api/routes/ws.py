@@ -7,15 +7,18 @@ Replaces Supabase Realtime. The API listens to Postgres NOTIFY on the
 import asyncio
 import json
 import logging
+import uuid
 
 import asyncpg
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-
 from auth import verify_token
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+WS_CLOSE_AUTH = 4001
+WS_CLOSE_FORBIDDEN = 4003
 
 
 class DocumentWSManager:
@@ -48,7 +51,7 @@ class DocumentWSManager:
         for ws in snapshot:
             try:
                 await ws.send_json(event)
-            except Exception:
+            except Exception:  # noqa: BLE001 - any send failure means this socket is dead.
                 dead.append(ws)
         for ws in dead:
             conns.discard(ws)
@@ -78,7 +81,7 @@ async def _supervise_listener(database_url: str) -> None:
             await _listen_until_closed(database_url)
         except asyncio.CancelledError:
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - listener supervision must recover from any asyncpg/socket failure.
             logger.warning("LISTEN connection lost (%s), reconnecting in %ds", e, RECONNECT_DELAY_SECONDS)
             await asyncio.sleep(RECONNECT_DELAY_SECONDS)
 
@@ -116,6 +119,29 @@ async def _handle_notify(payload: str) -> None:
         })
 
 
+async def _kb_owned_by_user(websocket: WebSocket, user_id: str, kb_id: str) -> bool:
+    pool = getattr(websocket.app.state, "pool", None)
+    if pool is None:
+        logger.warning("Rejecting WS connection without hosted DB pool")
+        return False
+    try:
+        uuid.UUID(kb_id)
+        uuid.UUID(user_id)
+        return bool(await pool.fetchval(
+            "SELECT 1 FROM knowledge_bases "
+            "WHERE id = $1::uuid AND user_id = $2::uuid",
+            kb_id,
+            user_id,
+        ))
+    except (ValueError, asyncpg.PostgresError):
+        logger.warning(
+            "Rejecting WS connection for invalid kb/user scope: user=%s kb=%s",
+            user_id[:8],
+            kb_id[:8],
+        )
+        return False
+
+
 @router.websocket("/v1/ws/documents/{kb_id}")
 async def document_ws(websocket: WebSocket, kb_id: str):
     await websocket.accept()
@@ -124,14 +150,18 @@ async def document_ws(websocket: WebSocket, kb_id: str):
     # Keeps the JWT out of URLs and logs.
     try:
         token = await asyncio.wait_for(websocket.receive_text(), timeout=5)
-    except (asyncio.TimeoutError, WebSocketDisconnect):
-        await websocket.close(code=4001, reason="Auth timeout")
+    except (TimeoutError, WebSocketDisconnect):
+        await websocket.close(code=WS_CLOSE_AUTH, reason="Auth timeout")
         return
 
     try:
         user_id = await verify_token(token)
     except ValueError:
-        await websocket.close(code=4001, reason="Invalid token")
+        await websocket.close(code=WS_CLOSE_AUTH, reason="Invalid token")
+        return
+
+    if not await _kb_owned_by_user(websocket, user_id, kb_id):
+        await websocket.close(code=WS_CLOSE_FORBIDDEN, reason="Forbidden")
         return
 
     await manager.connect(user_id, kb_id, websocket)
