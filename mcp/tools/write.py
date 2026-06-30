@@ -74,50 +74,6 @@ def _effective_date(content: str, provided: str | None = None) -> str | None:
     return fm_date or provided or None
 
 
-def _ensure_wiki_frontmatter(
-    content: str,
-    title: str,
-    tags: list[str],
-    date_str: str,
-    dir_path: str,
-    filename: str,
-    file_type: str,
-) -> str:
-    """Add required wiki frontmatter when the caller supplied metadata as args."""
-    if file_type != "md" or not dir_path.startswith("/wiki/"):
-        return content
-    if dir_path == "/wiki/" and filename == "log.md":
-        return content
-    if _FRONTMATTER_RE.match(content):
-        return content
-
-    metadata = {
-        "title": title,
-        "description": _default_description(content, title),
-        "date": date_str.strip() or date.today().isoformat(),
-        "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
-    }
-    frontmatter = yaml.safe_dump(
-        metadata,
-        sort_keys=False,
-        allow_unicode=False,
-        default_flow_style=False,
-    ).strip()
-    body = content.lstrip("\n")
-    return f"---\n{frontmatter}\n---\n\n{body}"
-
-
-def _default_description(content: str, title: str) -> str:
-    for raw_line in content.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("[^"):
-            continue
-        line = re.sub(r"^#+\s*", "", line).strip()
-        if line:
-            return line[:180]
-    return f"Notes about {title}."
-
-
 def _is_footnote_suffix_line(line: str) -> bool:
     return line.strip() == "" or line.startswith((" ", "\t")) or bool(_FOOTNOTE_DEF_RE.match(line))
 
@@ -190,6 +146,8 @@ def _renumber_colliding_footnotes(existing: str, addition: str) -> str:
 class WriteHandler:
     """Executes create, edit, and append operations on documents."""
 
+    _COMPLIANCE_FOOTER = '\n\n---\n⚠️  **MANDATORY NEXT STEPS** (required after every write):\n  1. **edit `/wiki/overview.md`** — update page count & Recent Updates\n  2. **append `/wiki/log.md`** — record this action\n  3. Use path prefixes: `/wiki/jk/` `/wiki/llmwiki/` `/wiki/ops/`\nThese are HARD constraints per /wiki/_governance.md'
+
     def __init__(self, fs: VaultFS, kb: dict):
         self.fs = fs
         self.kb = kb
@@ -200,14 +158,13 @@ class WriteHandler:
         if not title:
             return "Error: title is required when creating a note."
 
-        dir_path = self._to_dir_path(path)
-        filename, file_type = self._title_to_filename(title)
-        title = self._humanize_title(title)
-        content = _ensure_wiki_frontmatter(content, title, tags, date_str, dir_path, filename, file_type)
-
         effective_tags = _effective_tags(content, tags) or []
         if not effective_tags:
             return "Error: at least one tag is required when creating a note."
+
+        dir_path = self._to_dir_path(path)
+        filename, file_type = self._title_to_filename(title)
+        title = self._humanize_title(title)
 
         existing = await self.fs.get_document(self.kb_id, filename, dir_path)
 
@@ -401,6 +358,7 @@ class WriteHandler:
             f"Created **{title}** at `{dir_path}{filename}`\n"
             f"Tags: {', '.join(tags)} | Date: {note_date}\n"
             f"[View]({link}){suffix}"
+            + self._COMPLIANCE_FOOTER
         )
 
     def _format_edit_response(self, path: str, dir_path: str, filename: str, snippet: str) -> str:
@@ -409,12 +367,16 @@ class WriteHandler:
         return (
             f"Edited `{path}`. Replaced 1 occurrence.\n[View]({link})\n\n"
             f"**Context after edit:**\n```\n{snippet}\n```"
+            + self._COMPLIANCE_FOOTER
         )
 
     def _format_append_response(self, path: str, dir_path: str, filename: str) -> str:
         """Build the response message for an append operation."""
         link = deep_link(self.kb["slug"], dir_path, filename)
-        return f"Appended to `{path}`.\n[View]({link})"
+        return (
+            f"Appended to `{path}`.\n[View]({link})"
+            + self._COMPLIANCE_FOOTER
+        )
 
     def _embed_hint(self, title: str, filename: str, dir_path: str, file_type: str) -> str:
         """Return an embed or citation hint for the create response."""
@@ -458,8 +420,7 @@ def register(mcp: FastMCP, get_user_id, fs_factory) -> None:
         description=(
             "Create a new wiki page, note, or asset in the knowledge vault.\n\n"
             "Wiki pages should be created under `/wiki/` and should cite their sources using "
-            "markdown footnotes (e.g. `[^1]: paper.pdf, p.3`). If markdown wiki content "
-            "does not include YAML frontmatter, this tool adds it from `title`, `tags`, and `date_str`.\n\n"
+            "markdown footnotes (e.g. `[^1]: paper.pdf, p.3`).\n\n"
             "You can also create SVG diagrams and CSV data files as wiki assets:\n"
             "- `create(path=\"/wiki/\", title=\"architecture-diagram.svg\", content=\"<svg>...</svg>\", tags=[\"diagram\"])`\n"
             "- `create(path=\"/wiki/\", title=\"data-table.csv\", content=\"col1,col2\\nval1,val2\", tags=[\"data\"])`\n"
