@@ -209,13 +209,18 @@ Every write automatically parses citations and cross-references and stores them 
 
 Use the reference graph to maintain consistency. After editing a page, check the impact surface in the response and update affected pages.
 
-## ⚠️ 重要：操作本知识库前，必读治理规范
+## ⚠️ 重要：操作知识库前，必读治理规范
 
-Before writing to any knowledge base, you MUST first read the governance page:
-**read(knowledge_base="<slug>", path="/wiki/_governance.md")**
+Every knowledge base has a governance page that defines hard constraints for that KB.
+Before writing to **any** knowledge base, you MUST read its governance page first:
 
-It defines mandatory workflow rules (topic relevance, HUB/log updates, page quality).
-If the page does not exist, follow the standard workflow in this guide. Treat the governance rules as hard constraints.
+**`read(knowledge_base="<slug>", path="/wiki/_governance.md")`**
+
+Governance pages work in two layers:
+- **KB-level** `/wiki/_governance.md` — rules specific to that knowledge base (topic scope, path conventions, special workflows). Always takes precedence.
+- If a KB has no `_governance.md`, treat the standard workflow in this guide as the default rules.
+
+Treat governance rules as **hard constraints** — they override your defaults.
 
 ## Available Knowledge Bases
 
@@ -237,5 +242,8 @@ def register(mcp: FastMCP, get_user_id, fs_factory) -> None:
 
         lines = []
         for kb in kbs:
-            lines.append(f"- **{kb['name']}** (`{kb['slug']}`)")
+            lines.append(
+                f"- **{kb['name']}** (`{kb['slug']}`)"
+                f" — before writing, run: `read(knowledge_base=\"{kb['slug']}\", path=\"/wiki/_governance.md\")`"
+            )
         return GUIDE_TEXT + "\n".join(lines)

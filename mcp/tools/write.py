@@ -146,7 +146,15 @@ def _renumber_colliding_footnotes(existing: str, addition: str) -> str:
 class WriteHandler:
     """Executes create, edit, and append operations on documents."""
 
-    _COMPLIANCE_FOOTER = '\n\n---\n⚠️  **MANDATORY NEXT STEPS** (required after every write):\n  1. **edit `/wiki/overview.md`** — update page count & Recent Updates\n  2. **append `/wiki/log.md`** — record this action\n  3. Use path prefixes: `/wiki/jk/` `/wiki/llmwiki/` `/wiki/ops/`\nThese are HARD constraints per /wiki/_governance.md'
+    _COMPLIANCE_FOOTER = (
+        '\n\n---\n'
+        '⚠️  **MANDATORY NEXT STEPS** (required after every write — do NOT skip):\n'
+        '  1. **edit `/wiki/overview.md`** — update page count & Recent Updates\n'
+        '  2. **append `/wiki/log.md`** — record this action\n'
+        '  3. If you have not read this KB\'s governance yet: '
+        '`read(knowledge_base=<this_kb_slug>, path="/wiki/_governance.md")` — it may define additional rules.\n'
+        'These are HARD constraints.'
+    )
 
     def __init__(self, fs: VaultFS, kb: dict):
         self.fs = fs

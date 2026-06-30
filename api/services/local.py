@@ -115,13 +115,32 @@ class LocalKBService(KBService):
             f"This wiki tracks research on {name}.\n\n## Key Findings\n\nNo sources ingested yet.\n\n## Recent Updates\n\nNo activity yet."
         )
         log = f"Chronological record of ingests, queries, and maintenance passes.\n\n## [{today}] created | Wiki Created\n- Initialized wiki: {name}"
+        governance = (
+            f"---\ntitle: {name} — Governance\n"
+            f"description: Rules and conventions for the {name} knowledge base.\n"
+            f"date: {today}\ntags: [governance, rules]\n---\n\n"
+            f"This page defines the rules for the **{name}** knowledge base.\n\n"
+            "## Scope\n\nDescribe what topics belong in this KB.\n\n"
+            "## Path Conventions\n\n"
+            "| Path prefix | Topic |\n|-------------|-------|\n| `/wiki/` | Wiki pages |\n\n"
+            "## Additional Rules\n\n"
+            "Add any KB-specific rules here. These extend (not replace) the standard workflow in the guide.\n\n"
+            "## Standard Rules\n\n"
+            "All standard rules from the guide apply:\n"
+            "- Frontmatter required (title/description/date/tags≥2)\n"
+            "- Update `overview.md` and `log.md` after every write\n"
+            "- At least one visual element per page\n"
+            "- Run lint before finishing\n"
+        )
         (kb_wiki / "overview.md").write_text(overview, encoding="utf-8")
         (kb_wiki / "log.md").write_text(log, encoding="utf-8")
+        (kb_wiki / "_governance.md").write_text(governance, encoding="utf-8")
 
         # Index the scaffolded files into documents table
         for filename, content, tags in [
             ("overview.md", overview, '["overview","wiki"]'),
             ("log.md", log, '["log"]'),
+            ("_governance.md", governance, '["governance","rules"]'),
         ]:
             doc_id = str(uuid.uuid4())
             relative_path = f"{ws_id}/wiki/{filename}"

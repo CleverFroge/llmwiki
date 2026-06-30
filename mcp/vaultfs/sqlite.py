@@ -528,6 +528,25 @@ class SqliteVaultFS(VaultFS):
         today = date.today().isoformat()
         overview = _OVERVIEW_TEMPLATE.format(name=name, date=today)
         log = _LOG_TEMPLATE.format(name=name, date=today)
+        governance = (
+            f"---\ntitle: {name} — Governance\n"
+            f"description: Rules and conventions for the {name} knowledge base.\n"
+            f"date: {today}\ntags: [governance, rules]\n---\n\n"
+            f"This page defines the rules for the **{name}** knowledge base.\n\n"
+            "## Scope\n\n"
+            f"Describe what topics belong in this KB.\n\n"
+            "## Path Conventions\n\n"
+            "| Path prefix | Topic |\n|-------------|-------|\n"
+            "| `/wiki/` | Wiki pages |\n\n"
+            "## Additional Rules\n\n"
+            "Add any KB-specific rules here. These extend (not replace) the standard workflow in the guide.\n\n"
+            "## Standard Rules\n\n"
+            "All standard rules from the guide apply:\n"
+            "- Frontmatter required (title/description/date/tags≥2)\n"
+            "- Update `overview.md` and `log.md` after every write\n"
+            "- At least one visual element per page\n"
+            "- Run lint before finishing\n"
+        )
         # Each KB gets its own subdirectory: {kb_id}/wiki/
         kb_wiki_dir = f"/{kb_id}/wiki/"
         if not self._disk_file_exists(kb_wiki_dir, "overview.md"):
@@ -542,3 +561,10 @@ class SqliteVaultFS(VaultFS):
                 kb_id, "log.md", "Log", "/wiki/", "md", log, ["log"],
             )
             self.write_to_disk(kb_wiki_dir, "log.md", log)
+        if not self._disk_file_exists(kb_wiki_dir, "_governance.md"):
+            await self.create_document(
+                kb_id, "_governance.md", f"{name} — Governance", "/wiki/", "md", governance,
+                ["governance", "rules"], date=today,
+                metadata={"description": f"Rules and conventions for the {name} knowledge base."},
+            )
+            self.write_to_disk(kb_wiki_dir, "_governance.md", governance)
