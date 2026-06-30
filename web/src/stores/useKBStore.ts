@@ -17,10 +17,12 @@ type KBState = {
   renameKB: (id: string, name: string) => Promise<void>
 }
 
+const isLocal = process.env.NEXT_PUBLIC_MODE === 'local'
+
 function getToken(): string {
   const token = useUserStore.getState().accessToken
-  if (!token) throw new Error('Not authenticated')
-  return token
+  if (!token && !isLocal) throw new Error('Not authenticated')
+  return token ?? ''
 }
 
 export const useKBStore = create<KBState>((set, get) => ({
