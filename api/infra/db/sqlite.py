@@ -111,14 +111,15 @@ class SQLiteDocumentRepository:
         if path:
             cursor = await self._db.execute(
                 f"SELECT {_DOC_COLUMNS} FROM documents "
-                "WHERE path = ? AND status != 'failed' "
+                "WHERE kb_id = ? AND path = ? AND status != 'failed' "
                 "ORDER BY filename",
-                (path,),
+                (kb_id, path),
             )
         else:
             cursor = await self._db.execute(
                 f"SELECT {_DOC_COLUMNS} FROM documents "
-                "WHERE status != 'failed' ORDER BY filename",
+                "WHERE kb_id = ? AND status != 'failed' ORDER BY filename",
+                (kb_id,),
             )
         rows = await cursor.fetchall()
         return [_row_to_dict(cursor, r) for r in rows]
@@ -601,8 +602,8 @@ class SQLiteKBRepository:
         cursor = await self._db.execute(
             "SELECT w.id, w.user_id, w.name, w.name as slug, w.description, "
             "w.created_at, w.created_at as updated_at, "
-            "(SELECT count(*) FROM documents WHERE source_kind = 'source' AND status != 'failed') as source_count, "
-            "(SELECT count(*) FROM documents WHERE source_kind = 'wiki' AND status != 'failed') as wiki_page_count "
+            "(SELECT count(*) FROM documents WHERE kb_id = w.id AND source_kind = 'source' AND status != 'failed') as source_count, "
+            "(SELECT count(*) FROM documents WHERE kb_id = w.id AND source_kind = 'wiki' AND status != 'failed') as wiki_page_count "
             "FROM workspace w",
         )
         rows = await cursor.fetchall()
@@ -612,8 +613,8 @@ class SQLiteKBRepository:
         cursor = await self._db.execute(
             "SELECT w.id, w.user_id, w.name, w.name as slug, w.description, "
             "w.created_at, w.created_at as updated_at, "
-            "(SELECT count(*) FROM documents WHERE source_kind = 'source' AND status != 'failed') as source_count, "
-            "(SELECT count(*) FROM documents WHERE source_kind = 'wiki' AND status != 'failed') as wiki_page_count "
+            "(SELECT count(*) FROM documents WHERE kb_id = w.id AND source_kind = 'source' AND status != 'failed') as source_count, "
+            "(SELECT count(*) FROM documents WHERE kb_id = w.id AND source_kind = 'wiki' AND status != 'failed') as wiki_page_count "
             "FROM workspace w WHERE w.id = ?",
             (kb_id,),
         )
