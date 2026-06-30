@@ -211,20 +211,23 @@ Use the reference graph to maintain consistency. After editing a page, check the
 
 ## ⚠️ 重要：操作知识库前，必读治理规范
 
-Every knowledge base has a governance page that defines hard constraints for that KB.
-Before writing to **any** knowledge base, you MUST read its governance page first:
+Governance works in **two layers** — you MUST read both before writing to any KB:
 
-**`read(knowledge_base="<slug>", path="/wiki/_governance.md")`**
+**Layer 1 — Global rules** (apply to ALL knowledge bases):
+`read(knowledge_base="Governance", path="/wiki/_governance.md")`
 
-Governance pages work in two layers:
-- **KB-level** `/wiki/_governance.md` — rules specific to that knowledge base (topic scope, path conventions, special workflows). Always takes precedence.
-- If a KB has no `_governance.md`, treat the standard workflow in this guide as the default rules.
+**Layer 2 — KB-level rules** (apply to the specific KB you are working in):
+`read(knowledge_base="<target_kb_slug>", path="/wiki/_governance.md")`
 
-Treat governance rules as **hard constraints** — they override your defaults.
+The KB-level rules **extend** the global rules with topic-specific constraints.
+If a KB has no `_governance.md`, only the global rules apply.
+Treat all governance rules as **hard constraints** — they override your defaults.
 
 ## Available Knowledge Bases
 
 """
+
+_GOVERNANCE_KB_NAME = "Governance"
 
 
 def register(mcp: FastMCP, get_user_id, fs_factory) -> None:
@@ -240,10 +243,23 @@ def register(mcp: FastMCP, get_user_id, fs_factory) -> None:
         if not kbs:
             return GUIDE_TEXT + "No knowledge bases yet. Create one at " + settings.APP_URL + "/wikis"
 
+        # Separate Governance KB from regular KBs
+        governance_kb = next((kb for kb in kbs if kb["name"] == _GOVERNANCE_KB_NAME), None)
+        regular_kbs = [kb for kb in kbs if kb["name"] != _GOVERNANCE_KB_NAME]
+
         lines = []
-        for kb in kbs:
+
+        if governance_kb:
+            lines.append(
+                f"- **{governance_kb['name']}** (`{governance_kb['slug']}`) ← **Global governance**"
+                f" — read this FIRST: `read(knowledge_base=\"{governance_kb['slug']}\", path=\"/wiki/_governance.md\")`"
+            )
+            lines.append("")
+
+        for kb in regular_kbs:
             lines.append(
                 f"- **{kb['name']}** (`{kb['slug']}`)"
-                f" — before writing, run: `read(knowledge_base=\"{kb['slug']}\", path=\"/wiki/_governance.md\")`"
+                f" — KB rules: `read(knowledge_base=\"{kb['slug']}\", path=\"/wiki/_governance.md\")`"
             )
+
         return GUIDE_TEXT + "\n".join(lines)

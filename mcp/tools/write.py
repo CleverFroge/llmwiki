@@ -151,8 +151,9 @@ class WriteHandler:
         '⚠️  **MANDATORY NEXT STEPS** (required after every write — do NOT skip):\n'
         '  1. **edit `/wiki/overview.md`** — update page count & Recent Updates\n'
         '  2. **append `/wiki/log.md`** — record this action\n'
-        '  3. If you have not read this KB\'s governance yet: '
-        '`read(knowledge_base=<this_kb_slug>, path="/wiki/_governance.md")` — it may define additional rules.\n'
+        '  3. Governance check (if not already done this session):\n'
+        '     - Global rules: `read(knowledge_base="Governance", path="/wiki/_governance.md")`\n'
+        '     - KB rules:     `read(knowledge_base=<this_kb_slug>, path="/wiki/_governance.md")`\n'
         'These are HARD constraints.'
     )
 
