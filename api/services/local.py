@@ -61,26 +61,82 @@ class LocalKBService(KBService):
         cursor = await self.db.execute(
             "SELECT w.id, w.user_id, w.name, w.name as slug, w.description, w.kind, "
             "w.created_at, w.created_at as updated_at, "
-            "(SELECT count(*) FROM documents WHERE source_kind = 'source' AND status != 'failed') as source_count, "
-            "(SELECT count(*) FROM documents WHERE source_kind = 'wiki' AND status != 'failed') as wiki_page_count "
-            "FROM workspace w",
+            "(SELECT count(*) FROM documents WHERE kb_id = w.id AND source_kind = 'source' AND status != 'failed') as source_count, "
+            "(SELECT count(*) FROM documents WHERE kb_id = w.id AND source_kind = 'wiki' AND status != 'failed') as wiki_page_count "
+            "FROM workspace w WHERE w.user_id = ?",
+            (self.user_id,),
         )
         rows = await cursor.fetchall()
         cols = [d[0] for d in cursor.description]
         return [dict(zip(cols, r)) for r in rows]
 
     async def get(self, kb_id: str) -> dict | None:
-        kbs = await self.list()
-        return kbs[0] if kbs else None
+        cursor = await self.db.execute(
+            "SELECT w.id, w.user_id, w.name, w.name as slug, w.description, w.kind, "
+            "w.created_at, w.created_at as updated_at, "
+            "(SELECT count(*) FROM documents WHERE kb_id = w.id AND source_kind = 'source' AND status != 'failed') as source_count, "
+            "(SELECT count(*) FROM documents WHERE kb_id = w.id AND source_kind = 'wiki' AND status != 'failed') as wiki_page_count "
+            "FROM workspace w WHERE w.id = ? AND w.user_id = ?",
+            (kb_id, self.user_id),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cursor.description]
+        return dict(zip(cols, row))
 
     async def create(self, name: str, description: str | None, kind: str | None = None) -> dict:
-        kbs = await self.list()
-        if kbs:
-            existing = kbs[0]
-            if kind == "course" and existing["kind"] != "course":
-                return await self.update(existing["id"], None, None, "course")
-            return existing
-        raise HTTPException(status_code=400, detail="No workspace initialized")
+        # Check if a KB with this name already exists
+        cursor = await self.db.execute(
+            "SELECT id FROM workspace WHERE user_id = ? AND name = ?",
+            (self.user_id, name),
+        )
+        existing_row = await cursor.fetchone()
+        if existing_row:
+            return await self.get(existing_row[0])
+
+        ws_id = str(uuid.uuid4())
+        today = __import__('datetime').date.today().isoformat()
+        async with serialized_write():
+            await self.db.execute(
+                "INSERT INTO workspace (id, name, description, kind, user_id) VALUES (?, ?, ?, ?, ?)",
+                (ws_id, name, description or "", kind or "wiki", self.user_id),
+            )
+            await self.db.commit()
+
+        # Scaffold overview.md and log.md for the new KB
+        from pathlib import Path
+        ws_root = Path(settings.WORKSPACE_PATH)
+        kb_wiki = ws_root / ws_id / "wiki"
+        kb_wiki.mkdir(parents=True, exist_ok=True)
+        overview = (
+            f"---\ntitle: Overview\ndescription: Research hub for {name}.\n"
+            f"date: {today}\ntags: [overview, wiki]\n---\n\n"
+            f"This wiki tracks research on {name}.\n\n## Key Findings\n\nNo sources ingested yet.\n\n## Recent Updates\n\nNo activity yet."
+        )
+        log = f"Chronological record of ingests, queries, and maintenance passes.\n\n## [{today}] created | Wiki Created\n- Initialized wiki: {name}"
+        (kb_wiki / "overview.md").write_text(overview, encoding="utf-8")
+        (kb_wiki / "log.md").write_text(log, encoding="utf-8")
+
+        # Index the scaffolded files into documents table
+        for filename, content, tags in [
+            ("overview.md", overview, '["overview","wiki"]'),
+            ("log.md", log, '["log"]'),
+        ]:
+            doc_id = str(uuid.uuid4())
+            relative_path = f"{ws_id}/wiki/{filename}"
+            await self.db.execute(
+                "INSERT INTO documents (id, kb_id, user_id, filename, title, path, relative_path, "
+                "source_kind, file_type, status, content, tags, date, version, document_number) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'wiki', 'md', 'ready', ?, ?, ?, 1, "
+                "(SELECT COALESCE(MAX(document_number),0)+1 FROM documents))",
+                (doc_id, ws_id, self.user_id, filename,
+                 "Overview" if filename == "overview.md" else "Log",
+                 "/wiki/", relative_path, content, tags, today),
+            )
+        await self.db.commit()
+
+        return await self.get(ws_id)
 
     async def update(self, kb_id: str, name: str | None, description: str | None, kind: str | None = None) -> dict | None:
         sets = []

@@ -113,7 +113,10 @@ class SqliteVaultFS(VaultFS):
 
     async def resolve_kb(self, slug: str) -> dict | None:
         db = self._db_or_raise()
-        cursor = await db.execute("SELECT id, name, user_id FROM workspace LIMIT 1")
+        cursor = await db.execute(
+            "SELECT id, name, user_id FROM workspace WHERE user_id = ? AND name = ?",
+            (self.user_id, slug),
+        )
         row = await cursor.fetchone()
         if not row:
             return None
@@ -125,27 +128,24 @@ class SqliteVaultFS(VaultFS):
         db = self._db_or_raise()
         cursor = await db.execute(
             "SELECT w.id, w.name, w.name as slug, w.description, w.created_at, "
-            "(SELECT count(*) FROM documents WHERE source_kind != 'wiki' AND status != 'failed') as source_count, "
-            "(SELECT count(*) FROM documents WHERE source_kind = 'wiki' AND status != 'failed') as wiki_count "
-            "FROM workspace w",
+            "(SELECT count(*) FROM documents WHERE kb_id = w.id AND source_kind != 'wiki' AND status != 'failed') as source_count, "
+            "(SELECT count(*) FROM documents WHERE kb_id = w.id AND source_kind = 'wiki' AND status != 'failed') as wiki_count "
+            "FROM workspace w WHERE w.user_id = ?",
+            (self.user_id,),
         )
         return _rows_to_dicts(cursor, await cursor.fetchall())
 
     async def create_knowledge_base(self, name: str, description: str | None = None, kind: str = "wiki") -> dict:
-        """Create the local singleton workspace, or return it if already initialized."""
+        """Create a new knowledge base, or return existing one with the same name."""
         db = self._db_or_raise()
         cursor = await db.execute(
-            "SELECT id, name, name as slug, description, kind, created_at FROM workspace LIMIT 1",
+            "SELECT id, name, name as slug, description, kind, created_at FROM workspace WHERE user_id = ? AND name = ?",
+            (self.user_id, name),
         )
         row = await cursor.fetchone()
         if row:
             existing = _rows_to_dicts(cursor, [row])[0]
-            if kind == "course" and existing["kind"] != "course":
-                await db.execute("UPDATE workspace SET kind = ? WHERE id = ?", ("course", existing["id"]))
-                await db.commit()
-                existing["kind"] = "course"
             existing["already_exists"] = True
-            existing["local_singleton"] = True
             return existing
 
         ws_id = str(uuid.uuid4())
@@ -156,12 +156,10 @@ class SqliteVaultFS(VaultFS):
         await db.commit()
 
         await self._scaffold_wiki(ws_id, name)
-        kb = await self.resolve_kb(name)
         return {
-            **(kb or {"id": ws_id, "name": name, "slug": name}),
+            "id": ws_id, "name": name, "slug": name,
             "description": description or "",
             "already_exists": False,
-            "local_singleton": True,
         }
 
 
@@ -170,8 +168,8 @@ class SqliteVaultFS(VaultFS):
         cursor = await db.execute(
             "SELECT id, user_id, filename, title, path, content, tags, version, "
             "file_type, page_count, highlights, metadata, date, created_at, updated_at "
-            "FROM documents WHERE filename = ? AND path = ? AND status != 'failed'",
-            (filename, dir_path),
+            "FROM documents WHERE kb_id = ? AND filename = ? AND path = ? AND status != 'failed'",
+            (kb_id, filename, dir_path),
         )
         rows = _rows_to_dicts(cursor, await cursor.fetchall())
         return rows[0] if rows else None
@@ -182,8 +180,8 @@ class SqliteVaultFS(VaultFS):
         cursor = await db.execute(
             "SELECT id, user_id, filename, title, path, content, tags, version, "
             "file_type, page_count, highlights, metadata, date, created_at, updated_at "
-            "FROM documents WHERE (lower(filename) = ? OR lower(title) = ?) AND status != 'failed'",
-            (name_lower, name_lower),
+            "FROM documents WHERE kb_id = ? AND (lower(filename) = ? OR lower(title) = ?) AND status != 'failed'",
+            (kb_id, name_lower, name_lower),
         )
         rows = _rows_to_dicts(cursor, await cursor.fetchall())
         return rows[0] if rows else None
@@ -191,7 +189,8 @@ class SqliteVaultFS(VaultFS):
     async def create_document(self, kb_id: str, filename: str, title: str, dir_path: str, file_type: str, content: str, tags: list[str], date: str | None = None, metadata: dict | None = None) -> dict:
         db = self._db_or_raise()
         doc_id = str(uuid.uuid4())
-        relative_path = (dir_path.rstrip("/") + "/" + filename).lstrip("/")
+        # 文件路径加 kb_id 前缀，隔离不同 KB 的文件
+        relative_path = (kb_id + "/" + dir_path.rstrip("/") + "/" + filename).lstrip("/")
         source_kind = "wiki" if dir_path.strip("/").startswith("wiki") else "source"
 
         cursor = await db.execute("SELECT COALESCE(MAX(document_number), 0) + 1 FROM documents")
@@ -200,10 +199,10 @@ class SqliteVaultFS(VaultFS):
 
         try:
             await db.execute(
-                "INSERT INTO documents (id, user_id, filename, title, path, relative_path, source_kind, "
+                "INSERT INTO documents (id, kb_id, user_id, filename, title, path, relative_path, source_kind, "
                 "file_type, status, content, tags, date, metadata, version, document_number) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?, 1, ?)",
-                (doc_id, self.user_id, filename, title, dir_path, relative_path, source_kind,
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?, 1, ?)",
+                (doc_id, kb_id, self.user_id, filename, title, dir_path, relative_path, source_kind,
                  file_type, content, json.dumps(tags), date,
                  json.dumps(metadata) if metadata else None, doc_number),
             )
@@ -270,9 +269,10 @@ class SqliteVaultFS(VaultFS):
         db = self._db_or_raise()
         cursor = await db.execute(
             "SELECT id, filename, title, path, file_type, tags, page_count, date, updated_at "
-            "FROM documents WHERE status != 'failed' "
+            "FROM documents WHERE kb_id = ? AND status != 'failed' "
             "AND COALESCE(json_extract(metadata, '$.asset'), 0) != 1 "
             "ORDER BY path, filename",
+            (kb_id,),
         )
         return _rows_to_dicts(cursor, await cursor.fetchall())
 
@@ -280,9 +280,10 @@ class SqliteVaultFS(VaultFS):
         db = self._db_or_raise()
         cursor = await db.execute(
             "SELECT id, filename, title, path, content, tags, file_type, page_count, highlights, metadata, date "
-            "FROM documents WHERE status != 'failed' "
+            "FROM documents WHERE kb_id = ? AND status != 'failed' "
             "AND COALESCE(json_extract(metadata, '$.asset'), 0) != 1 "
             "ORDER BY path, filename",
+            (kb_id,),
         )
         return _rows_to_dicts(cursor, await cursor.fetchall())
 
@@ -330,9 +331,9 @@ class SqliteVaultFS(VaultFS):
             "FROM document_chunks dc "
             "JOIN chunks_fts fts ON dc.rowid = fts.rowid "
             "JOIN documents d ON dc.document_id = d.id "
-            "WHERE chunks_fts MATCH ? AND d.status != 'failed' "
+            "WHERE chunks_fts MATCH ? AND d.kb_id = ? AND d.status != 'failed' "
         )
-        params: list = [query]
+        params: list = [query, kb_id]
         if annotated_only:
             sql += "AND dc.has_highlight = 1 "
         if path_filter == "wiki":
@@ -482,9 +483,10 @@ class SqliteVaultFS(VaultFS):
         cursor = await db.execute(
             "SELECT d.filename, d.title, d.path, d.file_type "
             "FROM documents d "
-            "WHERE d.source_kind != 'wiki' AND d.status != 'failed' "
+            "WHERE d.kb_id = ? AND d.source_kind != 'wiki' AND d.status != 'failed' "
             "  AND d.id NOT IN (SELECT target_document_id FROM document_references WHERE reference_type = 'cites') "
             "ORDER BY d.filename",
+            (kb_id,),
         )
         return _rows_to_dicts(cursor, await cursor.fetchall())
 
@@ -493,8 +495,9 @@ class SqliteVaultFS(VaultFS):
         cursor = await db.execute(
             "SELECT d.filename, d.title, d.path, d.stale_since "
             "FROM documents d "
-            "WHERE d.status != 'failed' AND d.stale_since IS NOT NULL "
+            "WHERE d.kb_id = ? AND d.status != 'failed' AND d.stale_since IS NOT NULL "
             "ORDER BY d.stale_since DESC",
+            (kb_id,),
         )
         return _rows_to_dicts(cursor, await cursor.fetchall())
 
@@ -504,9 +507,12 @@ class SqliteVaultFS(VaultFS):
         return await self.resolve_kb("")
 
     async def ensure_workspace(self, workspace_name: str) -> str:
-        """Ensure a workspace row exists. Returns the workspace ID."""
+        """Ensure the default workspace row exists. Returns the workspace ID."""
         db = self._db_or_raise()
-        cursor = await db.execute("SELECT id FROM workspace LIMIT 1")
+        cursor = await db.execute(
+            "SELECT id FROM workspace WHERE user_id = ? AND name = ?",
+            (self.user_id, workspace_name),
+        )
         row = await cursor.fetchone()
         if row:
             return row[0]
@@ -522,16 +528,17 @@ class SqliteVaultFS(VaultFS):
         today = date.today().isoformat()
         overview = _OVERVIEW_TEMPLATE.format(name=name, date=today)
         log = _LOG_TEMPLATE.format(name=name, date=today)
-        # Never overwrite existing local content — a rebuilt index could scaffold over real files.
-        if not self._disk_file_exists("/wiki/", "overview.md"):
+        # Each KB gets its own subdirectory: {kb_id}/wiki/
+        kb_wiki_dir = f"/{kb_id}/wiki/"
+        if not self._disk_file_exists(kb_wiki_dir, "overview.md"):
             await self.create_document(
                 kb_id, "overview.md", "Overview", "/wiki/", "md", overview,
                 ["overview", "wiki"], date=today,
                 metadata={"description": f"Research hub for {name}."},
             )
-            self.write_to_disk("/wiki/", "overview.md", overview)
-        if not self._disk_file_exists("/wiki/", "log.md"):
+            self.write_to_disk(kb_wiki_dir, "overview.md", overview)
+        if not self._disk_file_exists(kb_wiki_dir, "log.md"):
             await self.create_document(
                 kb_id, "log.md", "Log", "/wiki/", "md", log, ["log"],
             )
-            self.write_to_disk("/wiki/", "log.md", log)
+            self.write_to_disk(kb_wiki_dir, "log.md", log)

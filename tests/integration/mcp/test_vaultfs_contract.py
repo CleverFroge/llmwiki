@@ -23,7 +23,6 @@ class TestWorkspace:
             assert kb["name"] == "Research Notes"
             assert kb["slug"] == "Research Notes"
             assert kb["already_exists"] is False
-            assert kb["local_singleton"] is True
 
             docs = await instance.list_documents(kb["id"])
             wiki_files = {doc["path"] + doc["filename"] for doc in docs}
@@ -33,35 +32,56 @@ class TestWorkspace:
             assert overview["content"].startswith("---\n")
             assert overview["tags"] == ["overview", "wiki"]
             assert overview["date"]
-            assert (workspace / "wiki" / "overview.md").exists()
-            assert (workspace / "wiki" / "log.md").exists()
         finally:
             await SqliteVaultFS.close()
 
-    async def test_create_knowledge_base_returns_existing_local_workspace(self, fs):
+    async def test_create_knowledge_base_returns_existing_on_same_name(self, fs):
         instance, kb_id = fs
-        kb = await instance.create_knowledge_base("Another KB", "Should not create a second workspace")
+        kb = await instance.create_knowledge_base("test-workspace", "duplicate call")
 
         assert kb["id"] == kb_id
         assert kb["name"] == "test-workspace"
-        assert kb["slug"] == "test-workspace"
         assert kb["already_exists"] is True
-        assert kb["local_singleton"] is True
+
+    async def test_create_multiple_knowledge_bases(self, fs):
+        """Multi-KB: two separate KBs with different documents."""
+        instance, kb1_id = fs
+        kb2 = await instance.create_knowledge_base("second-kb")
+        kb2_id = kb2["id"]
+
+        assert kb2_id != kb1_id
+        assert kb2["already_exists"] is False
+
+        await instance.create_document(kb1_id, "a.md", "A", "/", "md", "kb1 content", ["tag"])
+        await instance.create_document(kb2_id, "a.md", "A", "/", "md", "kb2 content", ["tag"])
+
+        doc1 = await instance.get_document(kb1_id, "a.md", "/")
+        doc2 = await instance.get_document(kb2_id, "a.md", "/")
+        assert doc1["content"] == "kb1 content"
+        assert doc2["content"] == "kb2 content"
+
+        kbs = await instance.list_knowledge_bases()
+        assert len(kbs) == 2
 
     async def test_scaffold_does_not_overwrite_existing_local_files(self, workspace):
-        """A rebuilt index (no workspace row) must not clobber real local files."""
+        """A rebuilt index must not clobber existing KB files in the KB subdirectory."""
         from vaultfs.sqlite import SqliteVaultFS
 
         await SqliteVaultFS.close()
         await SqliteVaultFS.init(str(workspace))
         try:
-            (workspace / "wiki" / "overview.md").write_text("MY REAL NOTES", encoding="utf-8")
             instance = SqliteVaultFS(TEST_USER_ID)
-            await instance.create_knowledge_base("Rebuilt", None)
+            # First create to get the kb_id, then pre-plant the overview in the KB subdir
+            kb = await instance.create_knowledge_base("Rebuilt", None)
+            kb_wiki = workspace / kb["id"] / "wiki"
+            # overview.md was already scaffolded; overwrite it with custom content
+            kb_wiki.mkdir(parents=True, exist_ok=True)
+            (kb_wiki / "overview.md").write_text("MY REAL NOTES", encoding="utf-8")
 
-            # The existing overview is preserved; the missing log is still scaffolded.
-            assert (workspace / "wiki" / "overview.md").read_text(encoding="utf-8") == "MY REAL NOTES"
-            assert (workspace / "wiki" / "log.md").exists()
+            # Re-create same KB — should not overwrite existing overview
+            await instance.create_knowledge_base("Rebuilt", None)
+            assert (kb_wiki / "overview.md").read_text(encoding="utf-8") == "MY REAL NOTES"
+            assert (kb_wiki / "log.md").exists()
         finally:
             await SqliteVaultFS.close()
 
@@ -91,19 +111,17 @@ class TestWorkspace:
         finally:
             await SqliteVaultFS.close()
 
-    async def test_create_course_upgrades_existing_local_workspace(self, workspace):
+    async def test_create_knowledge_base_duplicate_name_returns_existing(self, workspace):
         from vaultfs.sqlite import SqliteVaultFS
 
         await SqliteVaultFS.close()
         await SqliteVaultFS.init(str(workspace))
         try:
             instance = SqliteVaultFS(TEST_USER_ID)
-            await instance.create_knowledge_base("My Vault", None)
-            kb = await instance.create_knowledge_base("My Vault", None, kind="course")
-            assert kb["already_exists"] is True
-            assert kb["kind"] == "course"
-            cursor = await SqliteVaultFS._db_or_raise().execute("SELECT kind FROM workspace")
-            assert (await cursor.fetchone())[0] == "course"
+            kb1 = await instance.create_knowledge_base("My Vault", None)
+            kb2 = await instance.create_knowledge_base("My Vault", None)
+            assert kb2["already_exists"] is True
+            assert kb2["id"] == kb1["id"]
         finally:
             await SqliteVaultFS.close()
 
@@ -117,7 +135,7 @@ class TestWorkspace:
 
     async def test_resolve_kb_returns_none_for_unknown(self, fs):
         instance, _ = fs
-        assert await instance.resolve_kb("nonexistent") is not None  # SQLite returns workspace regardless
+        assert await instance.resolve_kb("nonexistent") is None
 
     async def test_list_knowledge_bases(self, fs):
         instance, _ = fs

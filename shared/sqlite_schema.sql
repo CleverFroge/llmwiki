@@ -11,11 +11,12 @@ CREATE TABLE IF NOT EXISTS workspace (
     kind TEXT NOT NULL DEFAULT 'wiki',
     user_id TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now')),
-    UNIQUE(user_id)
+    UNIQUE(user_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+    kb_id TEXT,
     user_id TEXT NOT NULL,
     filename TEXT NOT NULL,
     title TEXT,
@@ -41,7 +42,7 @@ CREATE TABLE IF NOT EXISTS documents (
     highlights TEXT DEFAULT '[]',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
-    UNIQUE(relative_path)
+    UNIQUE(kb_id, relative_path)
 );
 
 CREATE TABLE IF NOT EXISTS document_pages (
@@ -105,6 +106,7 @@ CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON document_chunks B
     INSERT INTO chunks_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
 
+CREATE INDEX IF NOT EXISTS idx_documents_kb_id ON documents(kb_id);
 CREATE INDEX IF NOT EXISTS idx_documents_relative_path ON documents(relative_path);
 CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path);
 CREATE INDEX IF NOT EXISTS idx_documents_source_kind ON documents(source_kind);

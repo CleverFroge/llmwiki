@@ -11,11 +11,9 @@ def register(mcp: FastMCP, get_user_id, fs_factory) -> None:
         name="create_knowledge_base",
         description=(
             "Create a new knowledge base and scaffold starter overview/log pages.\n\n"
-            "Set kind='course' to create a course instead of a wiki — same structure, but the "
-            "app renders lesson progress (mark-complete, current/locked lessons). Default 'wiki'.\n\n"
-            "In hosted mode this creates a separate knowledge base with a unique slug. "
-            "In local MCP mode there is one workspace per server, so this returns the "
-            "existing workspace if it has already been initialized."
+            "Each knowledge base is independent — different topics, different documents, different wiki pages. "
+            "Use `knowledge_base=<slug>` (the name you provide here) with all other tools to target it.\n\n"
+            "Set kind='course' to create a course instead of a wiki. Default 'wiki'."
         ),
     )
     async def create_knowledge_base(
@@ -38,13 +36,6 @@ def register(mcp: FastMCP, get_user_id, fs_factory) -> None:
         kb = await fs.create_knowledge_base(name, description or None, kind)
 
         if kb.get("already_exists"):
-            if kb.get("local_singleton"):
-                label = "course" if kb.get("kind") == "course" else "knowledge base"
-                return (
-                    "Local MCP mode uses one workspace per server. "
-                    f"Existing {label}: **{kb['name']}** (`{kb['slug']}`). "
-                    "Use that slug with the other tools."
-                )
             return f"Knowledge base already exists: **{kb['name']}** (`{kb['slug']}`)."
 
         label = "course" if kind == "course" else "knowledge base"
