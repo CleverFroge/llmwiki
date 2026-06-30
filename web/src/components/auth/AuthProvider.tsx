@@ -38,7 +38,7 @@ export function AuthProvider({ userId, email, children }: AuthProviderProps) {
       setUser({ id: userId, email })
       setAccessToken('local')
       setOnboarded(true)
-      fetchKBs()
+      void fetchKBs()
       return
     }
 

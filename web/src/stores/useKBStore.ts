@@ -19,6 +19,7 @@ type KBState = {
 
 const isLocal = process.env.NEXT_PUBLIC_MODE === 'local'
 
+
 function getToken(): string {
   const token = useUserStore.getState().accessToken
   if (!token && !isLocal) throw new Error('Not authenticated')
