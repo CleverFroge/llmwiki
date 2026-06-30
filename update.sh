@@ -108,12 +108,17 @@ else
     warn "未找到 LLMWIKI_USER_ID，跳过 MCP server 启动（请手动设置后重试）"
 fi
 
-# ── 8. 启动前端 ──────────────────────────────────────────────────────────────
-info "启动前端（端口 3000）..."
+# ── 8. 构建并启动前端（生产模式，避免 dev 模式 hydration 陷阱）───────────────
+info "构建前端（生产模式）..."
 cd "$LLMWIKI_DIR/web"
+rm -rf .next
 NEXT_PUBLIC_MODE=local \
 NEXT_PUBLIC_API_URL="http://${SERVER_IP}:8000" \
-nohup npm run dev -- --hostname 0.0.0.0 \
+npm run build
+info "启动前端（端口 3000）..."
+NEXT_PUBLIC_MODE=local \
+NEXT_PUBLIC_API_URL="http://${SERVER_IP}:8000" \
+nohup npm run start -- --hostname 0.0.0.0 -p 3000 \
     > "$LLMWIKI_DIR/web.log" 2>&1 &
 
 # ── 9. 健康检查 ──────────────────────────────────────────────────────────────
@@ -137,6 +142,6 @@ elif [ -n "$LLMWIKI_USER_ID" ]; then
     warn "MCP  ✗  状态码 $MCP_STATUS — 查看日志: tail -f $LLMWIKI_DIR/mcp.log"
 fi
 
-info "Web  →  http://${SERVER_IP}:3000  (前端编译需 30s，稍后再访问)"
+info "Web  →  http://${SERVER_IP}:3000"
 echo "────────────────────────────────────"
 info "更新完成！"
