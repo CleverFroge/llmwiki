@@ -38,7 +38,10 @@ export function AuthProvider({ userId, email, children }: AuthProviderProps) {
       setUser({ id: userId, email })
       setAccessToken('local')
       setOnboarded(true)
-      void fetchKBs()
+      fetchKBs().catch(() => {
+        // ensure loading is cleared even on error
+        useKBStore.setState({ loading: false })
+      })
       return
     }
 
